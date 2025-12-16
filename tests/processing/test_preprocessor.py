@@ -1,7 +1,8 @@
 import tempfile
 from pathlib import Path
 
-from prow_failure_analysis.processing.preprocessor import CHARS_PER_TOKEN, LogPreprocessor
+from prow_failure_analysis.constants import CHARS_PER_TOKEN
+from prow_failure_analysis.processing.preprocessor import LogPreprocessor
 
 
 class TestLogPreprocessor:

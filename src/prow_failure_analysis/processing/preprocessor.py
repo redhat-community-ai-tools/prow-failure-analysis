@@ -8,9 +8,9 @@ from typing import Any
 from cordon import AnalysisConfig, SemanticLogAnalyzer
 from cordon.embedding import create_vectorizer
 
-logger = logging.getLogger(__name__)
+from ..constants import CHARS_PER_TOKEN
 
-CHARS_PER_TOKEN = 4
+logger = logging.getLogger(__name__)
 
 
 class LogPreprocessor:
