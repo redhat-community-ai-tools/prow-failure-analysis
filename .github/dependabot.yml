@@ -1,0 +1,29 @@
+version: 2
+updates:
+  # Python dependencies updates
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+      - "python"
+    groups:
+      production-dependencies:
+        patterns:
+          - "google-cloud-storage"
+          - "cordon"
+          - "dspy"
+          - "click"
+          - "pydantic"
+          - "tokenizers"
+          - "PyGithub"
+      dev-dependencies:
+        patterns:
+          - "pytest*"
+          - "mypy"
+          - "ruff"
+          - "pre-commit"
+          - "pytest-cov"
+          - "pytest-mock"
