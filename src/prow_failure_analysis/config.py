@@ -105,6 +105,14 @@ class Config:
         if not dashes:
             return None
 
+        if not self.github_token:
+            logger.warning(
+                f"Cannot validate org/repo '{org_repo_section}' - no GitHub token set. "
+                "Set GITHUB_TOKEN env var or use ORG_REPO/--org-repo to explicitly specify."
+            )
+            first_dash = dashes[0]
+            return f"{org_repo_section[:first_dash]}_{org_repo_section[first_dash + 1:]}"
+
         for dash_idx in dashes:
             org = org_repo_section[:dash_idx]
             repo = org_repo_section[dash_idx + 1 :]
@@ -113,7 +121,10 @@ class Config:
                 logger.info(f"Validated repo on GitHub: {org}/{repo}")
                 return f"{org}_{repo}"
 
-        logger.debug("No valid GitHub repo found, using first dash split")
+        logger.warning(
+            f"Could not validate '{org_repo_section}' against GitHub. "
+            "Use ORG_REPO env var or --org-repo flag to explicitly specify."
+        )
         first_dash = dashes[0]
         return f"{org_repo_section[:first_dash]}_{org_repo_section[first_dash + 1:]}"
 

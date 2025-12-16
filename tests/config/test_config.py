@@ -132,8 +132,8 @@ class TestConfig:
         assert config._extract_org_repo_section("invalid-job-name") is None
         assert config._extract_org_repo_section("periodic-job") is None
 
-    def test_find_valid_org_repo_split_first_dash(self):
-        """Test finding org/repo split uses first dash as fallback."""
+    def test_find_valid_org_repo_split_without_github_token(self):
+        """Test finding org/repo split warns and uses first dash when no token."""
         config = Config()
 
         result = config._find_valid_org_repo_split("windup-windup-ui-tests")
