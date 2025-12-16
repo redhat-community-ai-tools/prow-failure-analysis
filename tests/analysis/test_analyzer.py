@@ -1,6 +1,8 @@
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from prow_failure_analysis.analysis.analyzer import FailureAnalyzer, RCAReport, StepAnalysis
 from prow_failure_analysis.gcs.models import JobResult, StepResult
 
@@ -16,7 +18,7 @@ class TestRCAReport:
             pr_number=None,
             summary="Test failed",
             detailed_analysis="Details here",
-            is_infrastructure=False,
+            category="test",
             step_analyses=[],
         )
 
@@ -25,6 +27,7 @@ class TestRCAReport:
         assert "# Pipeline Failure Analysis" in md
         assert "**Job:** `test-job`" in md
         assert "**Build:** `12345`" in md
+        assert "**Category:** Test" in md
         assert "## Root Cause" in md
         assert "Test failed" in md
         assert "## Technical Details" in md
@@ -38,29 +41,30 @@ class TestRCAReport:
             pr_number="999",
             summary="Test failed",
             detailed_analysis="Details here",
-            is_infrastructure=False,
+            category="build",
             step_analyses=[],
         )
 
         md = report.to_markdown()
 
         assert "**PR:** #999" in md
+        assert "**Category:** Build" in md
 
-    def test_to_markdown_infrastructure_flag(self):
-        """Test markdown generation includes infrastructure warning."""
+    def test_to_markdown_category_display(self):
+        """Test markdown generation displays category."""
         report = RCAReport(
             job_name="test-job",
             build_id="12345",
             pr_number=None,
             summary="Test failed",
             detailed_analysis="Details here",
-            is_infrastructure=True,
+            category="infrastructure",
             step_analyses=[],
         )
 
         md = report.to_markdown()
 
-        assert "**Infrastructure Issue** ⚠️" in md
+        assert "**Category:** Infrastructure" in md
 
     def test_to_markdown_with_step_evidence(self):
         """Test markdown generation includes step evidence."""
@@ -77,7 +81,7 @@ class TestRCAReport:
             pr_number=None,
             summary="Test failed",
             detailed_analysis="Details here",
-            is_infrastructure=False,
+            category="build",
             step_analyses=[step_analysis],
         )
 
@@ -197,8 +201,8 @@ class TestFailureAnalyzer:
         assert artifacts_dict["files"]["long-file.txt"]["size"] == 2000
         assert len(artifacts_dict["files"]["long-file.txt"]["content_preview"]) == 1000
 
-    def test_create_empty_report(self, mocker):
-        """Test creating report for jobs with no failures."""
+    def test_forward_raises_on_no_failures(self, mocker):
+        """Test forward raises ValueError when there are no failures."""
         mocker.patch("prow_failure_analysis.analysis.analyzer.dspy")
         analyzer = FailureAnalyzer()
 
@@ -211,10 +215,5 @@ class TestFailureAnalyzer:
             failed_steps=[],
         )
 
-        report = analyzer._create_empty_report(job_result)
-
-        assert report.job_name == "test-job"
-        assert report.build_id == "12345"
-        assert report.pr_number == "999"
-        assert "No failures detected" in report.summary
-        assert report.is_infrastructure is False
+        with pytest.raises(ValueError, match="No failures to analyze"):
+            analyzer.forward(job_result)

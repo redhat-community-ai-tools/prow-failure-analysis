@@ -93,4 +93,6 @@ class GenerateRCA(dspy.Signature):
             "Keep each bullet to 1-2 sentences. Be scannable for GitHub comments."
         )
     )
-    is_infrastructure: bool = dspy.OutputField(desc="True if primarily infrastructure failures")
+    category: str = dspy.OutputField(
+        desc="Primary failure category: infrastructure/test/build/configuration/timeout/unknown"
+    )

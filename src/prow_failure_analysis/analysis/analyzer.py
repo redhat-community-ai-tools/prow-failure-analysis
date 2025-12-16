@@ -41,7 +41,7 @@ class RCAReport:
     pr_number: str | None
     summary: str
     detailed_analysis: str
-    is_infrastructure: bool
+    category: str
     step_analyses: list[StepAnalysis]
     test_analyses: list[TestFailureAnalysis] = field(default_factory=list)
 
@@ -55,8 +55,7 @@ class RCAReport:
 
         if self.pr_number:
             parts.append(f" | **PR:** #{self.pr_number}")
-        if self.is_infrastructure:
-            parts.append(" | **Infrastructure Issue** ⚠️")
+        parts.append(f" | **Category:** {self.category.title()}")
 
         parts.extend(["\n\n---\n", "## Root Cause\n\n", f"{self.summary}\n\n"])
         parts.extend(["## Technical Details\n\n", f"{self.detailed_analysis}\n\n"])
@@ -247,18 +246,6 @@ class FailureAnalyzer(dspy.Module):
 
         return json.dumps(steps_dict, indent=2), json.dumps(tests_dict, indent=2), json.dumps(artifacts_dict, indent=2)
 
-    def _create_empty_report(self, job_result: JobResult) -> RCAReport:
-        """Create report for jobs with no failures."""
-        return RCAReport(
-            job_name=job_result.job_name,
-            build_id=job_result.build_id,
-            pr_number=job_result.pr_number,
-            summary="No failures detected in this job run.",
-            detailed_analysis="All steps completed successfully.",
-            is_infrastructure=False,
-            step_analyses=[],
-        )
-
     def _create_error_report(
         self,
         job_result: JobResult,
@@ -273,18 +260,21 @@ class FailureAnalyzer(dspy.Module):
             pr_number=job_result.pr_number,
             summary=f"RCA generation failed: {str(error)}",
             detailed_analysis="Unable to generate detailed analysis.",
-            is_infrastructure=False,
+            category="unknown",
             step_analyses=step_analyses,
             test_analyses=test_analyses,
         )
 
     def forward(self, job_result: JobResult) -> RCAReport:
-        """Analyze job failures and generate RCA report."""
+        """Analyze job failures and generate RCA report.
+
+        Raises:
+            ValueError: If there are no failures to analyze
+        """
         logger.info(f"Starting analysis of {len(job_result.failed_steps)} failed steps")
 
         if not job_result.failed_steps:
-            logger.warning("No failed steps to analyze")
-            return self._create_empty_report(job_result)
+            raise ValueError("No failures to analyze - job passed or no failed steps found")
 
         step_analyses = [self._analyze_step(step, job_result.step_graph) for step in job_result.failed_steps]
         test_analyses = self._analyze_all_test_failures(job_result.failed_tests)
@@ -310,7 +300,7 @@ class FailureAnalyzer(dspy.Module):
                 pr_number=job_result.pr_number,
                 summary=rca.summary,
                 detailed_analysis=rca.detailed_analysis,
-                is_infrastructure=rca.is_infrastructure,
+                category=rca.category,
                 step_analyses=step_analyses,
                 test_analyses=test_analyses,
             )
