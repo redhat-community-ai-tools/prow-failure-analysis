@@ -1,5 +1,6 @@
 import json
 import logging
+import tempfile
 from datetime import datetime
 from typing import Any
 
@@ -191,19 +192,37 @@ class GCSClient:
             return None
 
         # Only fetch logs for failed steps
-        log_content = None
+        log_path = None
         log_size = 0
+
         if not finished_metadata.passed:
-            log_content = self._fetch_blob_text(f"{step_path}/build-log.txt")
-            if log_content:
-                log_size = len(log_content)
-            else:
-                logger.warning(f"Failed step {stage_name}/{step_name} has no build-log.txt")
+            blob_path = f"{step_path}/build-log.txt"
+            blob = self.bucket.blob(blob_path)
+
+            try:
+                # Stream logs to temp files to avoid memory issues
+                blob.reload()  # Get metadata including size
+                log_size = blob.size or 0
+
+                if log_size > 0:
+                    # Create temp file
+                    tmp_file = tempfile.NamedTemporaryFile(mode="w", suffix=".log", delete=False)
+                    tmp_path = tmp_file.name
+                    tmp_file.close()
+
+                    # Stream download to file
+                    blob.download_to_filename(tmp_path)
+                    log_path = tmp_path
+                    logger.debug(f"Step {stage_name}/{step_name}: streamed {log_size} bytes to temp file")
+                else:
+                    logger.warning(f"Failed step {stage_name}/{step_name} has empty build-log.txt")
+            except Exception as e:
+                logger.warning(f"Failed to fetch log for {stage_name}/{step_name}: {e}")
 
         return StepResult(
             name=f"{stage_name}/{step_name}",
             passed=finished_metadata.passed,
-            log_content=log_content,
+            log_path=log_path,
             log_size=log_size,
             timestamp=finished_metadata.timestamp,
             finished_metadata=finished_metadata,
@@ -226,7 +245,7 @@ class GCSClient:
             blob_name = blob.name.lower()
             # Expanded patterns to catch more test result files:
             # - junit*.xml (standard JUnit files)
-            # - *report*.xml (e2e-report.xml, test-report.xml)
+            # - *report*.xml (e.g., e2e-report.xml, test-report.xml)
             # - Files in results/ directories
             # - Files in test-results/ directories
             if blob_name.endswith(".xml") and (
@@ -239,7 +258,7 @@ class GCSClient:
                 # Path format: {base}/artifacts/{stage}/{step}/artifacts/{file}.xml
                 path_parts = blob.name.split("/")
                 if len(path_parts) >= 4:
-                    # Get stage/step ("appstudio-e2e-tests/redhat-appstudio-report")
+                    # Get stage/step (e.g., "appstudio-e2e-tests/redhat-appstudio-report")
                     stage_idx = path_parts.index("artifacts") if "artifacts" in path_parts else -1
                     if stage_idx >= 0 and stage_idx + 2 < len(path_parts):
                         stage = path_parts[stage_idx + 1]
@@ -251,6 +270,7 @@ class GCSClient:
                             logger.debug(f"Ignoring XUnit file from filtered step: {full_step_name} ({blob.name})")
                             continue
 
+                # Verify the file actually exists before adding
                 if self._verify_blob_exists(blob.name):
                     xunit_files.append(blob.name)
                 else:

@@ -23,8 +23,8 @@ class StepResult:
 
     name: str
     passed: bool
-    log_content: str | None
-    log_size: int
+    log_path: str | None
+    log_size: int = 0
     timestamp: datetime | None = None
     finished_metadata: FinishedMetadata | None = None
 
