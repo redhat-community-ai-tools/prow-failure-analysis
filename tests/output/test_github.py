@@ -75,7 +75,10 @@ class TestPostPRComment:
             step_name="build-stage/compile",
             failure_category="build",
             root_cause="Compilation failed",
-            evidence=["Error: undefined symbol", "Error: missing header"],
+            evidence=[
+                {"source": "compile.log", "content": "Error: undefined symbol"},
+                {"source": "linker.log", "content": "Error: missing header"},
+            ],
         )
 
         report = RCAReport(

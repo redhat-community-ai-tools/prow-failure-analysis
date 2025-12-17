@@ -72,7 +72,10 @@ class TestRCAReport:
             step_name="test-stage/test-step",
             failure_category="build",
             root_cause="Build failed",
-            evidence=["Error 1", "Error 2"],
+            evidence=[
+                {"source": "build.log", "content": "Error 1"},
+                {"source": "compile.log", "content": "Error 2"},
+            ],
         )
 
         report = RCAReport(
@@ -89,8 +92,10 @@ class TestRCAReport:
 
         assert "## Evidence" in md
         assert "**test-stage/test-step** — *build*" in md
-        assert "- Error 1" in md
-        assert "- Error 2" in md
+        assert "**build.log:**" in md
+        assert "`Error 1`" in md
+        assert "**compile.log:**" in md
+        assert "`Error 2`" in md
 
 
 class TestFailureAnalyzer:

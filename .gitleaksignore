@@ -4,4 +4,3 @@ tests/security/test_leak_detector.py:jwt:*
 tests/security/test_leak_detector.py:private-key:*
 tests/security/test_leak_detector.py:aws-access-token:*
 tests/security/test_leak_detector.py:github-pat:*
-
