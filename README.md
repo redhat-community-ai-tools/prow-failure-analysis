@@ -160,6 +160,28 @@ The final report includes:
 
 ## Features
 
+### Secret Leak Detection
+
+The tool automatically scans all output (GitHub comments, console logs, and reports) for sensitive information before displaying it. This prevents accidental exposure of secrets in public comments or logs.
+
+**What it detects:**
+- AWS access keys and secret keys
+- GitHub tokens (personal access tokens, OAuth tokens)
+- Private keys (RSA, SSH, etc.)
+- JWT tokens
+- API keys from various services (Slack, Stripe, Twilio, etc.)
+- High-entropy strings (Base64, Hex) that may be secrets
+- Database connection strings with credentials
+- Basic authentication credentials
+
+**How it works:**
+- Uses the [detect-secrets](https://github.com/Yelp/detect-secrets) library to scan text
+- Automatically redacts detected secrets with labeled placeholders: `[REDACTED: AWS Access Key]`
+- Applied at multiple layers for defense in depth:
+  - During report generation
+  - Before posting GitHub comments
+  - Before printing to console
+
 ### Dynamic Token Budgeting
 
 The tool automatically adjusts token allocation based on:

@@ -3,6 +3,8 @@ from typing import TYPE_CHECKING
 
 from github import Auth, Github
 
+from ..security.leak_detector import LeakDetector
+
 if TYPE_CHECKING:
     from ..analysis.analyzer import RCAReport
 
@@ -84,7 +86,11 @@ def post_pr_comment(
 *Analysis powered by [prow-failure-analysis]({repo_url}) | Build: `{report.build_id}`*
 """
 
-        pr.create_issue_comment(comment_body)
+        # Final safety check: sanitize comment body to prevent any secret leaks
+        leak_detector = LeakDetector()
+        sanitized_comment = leak_detector.sanitize_text(comment_body)
+
+        pr.create_issue_comment(sanitized_comment)
         logger.info("Comment posted successfully")
 
     finally:

@@ -8,6 +8,7 @@ import dspy
 
 from ..gcs.models import JobResult, StepResult
 from ..parsing.xunit_models import FailedTest
+from ..security.leak_detector import LeakDetector
 from .signatures import AnalyzeArtifacts, AnalyzeStepFailure, AnalyzeTestFailure, GenerateRCA
 
 logger = logging.getLogger(__name__)
@@ -60,7 +61,7 @@ class RCAReport:
     artifact_analyses: list[ArtifactAnalysis] = field(default_factory=list)
 
     def to_markdown(self) -> str:
-        """Generate markdown formatted report."""
+        """Generate markdown formatted report with leak detection."""
         parts = [
             "# Pipeline Failure Analysis\n",
             f"**Job:** `{self.job_name}`\n",
@@ -93,7 +94,13 @@ class RCAReport:
                         else:
                             parts.append(f"`{content}`\n\n")
 
-        return "".join(parts)
+        markdown_output = "".join(parts)
+
+        # Sanitize the entire markdown output to prevent secret leaks
+        leak_detector = LeakDetector()
+        sanitized_output = leak_detector.sanitize_text(markdown_output)
+
+        return sanitized_output
 
 
 class FailureAnalyzer(dspy.Module):

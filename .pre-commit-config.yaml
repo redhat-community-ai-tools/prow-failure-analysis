@@ -11,6 +11,7 @@ repos:
       - id: check-toml
       - id: debug-statements
       - id: detect-private-key
+        exclude: ^tests/security/
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.8.4
