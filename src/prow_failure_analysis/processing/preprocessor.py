@@ -1,5 +1,3 @@
-"""Log preprocessing using cordon for semantic anomaly detection."""
-
 import logging
 import tempfile
 from pathlib import Path
