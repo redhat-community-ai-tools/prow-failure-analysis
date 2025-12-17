@@ -23,7 +23,15 @@ class AnalyzeStepFailure(dspy.Signature):
         desc="Failure category: infrastructure/test/build/configuration/timeout/unknown"
     )
     root_cause: str = dspy.OutputField(desc="Concise technical root cause (1-2 sentences)")
-    evidence: list[str] = dspy.OutputField(desc="3-5 key log excerpts showing the failure. Be selective.")
+    evidence: str = dspy.OutputField(
+        desc=(
+            'JSON array of evidence items. Each item has "source" (artifact path) and "content" (log excerpt). '
+            'Format: [{"source": "artifacts/step-name/build-log.txt line 123", "content": "error message here"}, ...]. '
+            "Use actual artifact paths relative to the job (e.g., artifacts/step-name/build-log.txt). "
+            "Include line numbers when relevant. Content should be verbatim log/error text. "
+            "Return valid JSON array - escape quotes and newlines properly."
+        )
+    )
 
 
 class AnalyzeTestFailure(dspy.Signature):
@@ -109,11 +117,14 @@ class GenerateRCA(dspy.Signature):
     )
     detailed_analysis: str = dspy.OutputField(
         desc=(
-            "Structured technical explanation using bullet points. Format as:\n"
-            "- **Immediate Cause:** (what directly failed)\n"
-            "- **Contributing Factors:** (related issues if any)\n"
-            "- **Impact:** (how this blocked the pipeline)\n"
-            "Keep each bullet to 1-2 sentences. Be scannable for GitHub comments."
+            "Structured technical explanation. Format as:\n"
+            "### Immediate Cause\n"
+            "(what directly failed - 1-2 sentences)\n\n"
+            "### Contributing Factors\n"
+            "(related issues if any - 1-2 sentences)\n\n"
+            "### Impact\n"
+            "(how this blocked the pipeline - 1-2 sentences)\n\n"
+            "Use markdown subheadings (###) for each section. Be concise and scannable."
         )
     )
     category: str = dspy.OutputField(

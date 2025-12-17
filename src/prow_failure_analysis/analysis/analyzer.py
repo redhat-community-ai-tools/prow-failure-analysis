@@ -25,7 +25,7 @@ class StepAnalysis:
     step_name: str
     failure_category: str
     root_cause: str
-    evidence: list[str]
+    evidence: list[dict[str, str]]  # List of {"source": "path", "content": "log excerpt"}
 
 
 @dataclass
@@ -79,8 +79,19 @@ class RCAReport:
             for analysis in self.step_analyses:
                 parts.append(f"**{analysis.step_name}** — *{analysis.failure_category}*\n\n")
                 if analysis.evidence:
-                    parts.extend([f"- {evidence}\n" for evidence in analysis.evidence])
-                    parts.append("\n")
+                    for item in analysis.evidence:
+                        # Evidence is now a dict with 'source' and 'content'
+                        source = item.get("source", "unknown")
+                        content = item.get("content", "").replace("`", "'").strip()
+
+                        # Add source label
+                        parts.append(f"**{source}:**\n\n")
+
+                        # Format content based on length/structure
+                        if "\n" in content or len(content) > 100:
+                            parts.append(f"```\n{content}\n```\n\n")
+                        else:
+                            parts.append(f"`{content}`\n\n")
 
         return "".join(parts)
 
@@ -160,11 +171,21 @@ class FailureAnalyzer(dspy.Module):
                 step_context=step_context,
             )
 
+            # Parse evidence JSON
+            evidence_list = []
+            try:
+                evidence_list = json.loads(result.evidence)
+                if not isinstance(evidence_list, list):
+                    evidence_list = []
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning(f"Failed to parse evidence JSON for {step.name}: {e}")
+                evidence_list = []
+
             return StepAnalysis(
                 step_name=step.name,
                 failure_category=result.failure_category,
                 root_cause=result.root_cause,
-                evidence=result.evidence if isinstance(result.evidence, list) else [],
+                evidence=evidence_list,
             )
         except Exception as e:
             logger.error(f"Step {step.name}: analysis failed: {e}")
@@ -323,7 +344,7 @@ class FailureAnalyzer(dspy.Module):
                 "step_name": a.step_name,
                 "failure_category": a.failure_category,
                 "root_cause": a.root_cause,
-                "evidence": a.evidence,
+                "evidence": a.evidence,  # Already a list of dicts
             }
             for a in step_analyses
         ]

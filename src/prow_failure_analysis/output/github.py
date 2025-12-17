@@ -61,9 +61,19 @@ def post_pr_comment(
                 comment_body += f"**Category:** `{analysis.failure_category}`  \n"
                 comment_body += f"**Root Cause:** {analysis.root_cause}\n\n"
                 if analysis.evidence:
-                    comment_body += "**Evidence:**\n"
-                    for evidence in analysis.evidence[:3]:
-                        comment_body += f"- `{evidence}`\n"
+                    comment_body += "**Evidence:**\n\n"
+                    for item in analysis.evidence:
+                        source = item.get("source", "unknown")
+                        content = item.get("content", "").replace("`", "'")
+                        # Use details/summary for expandable evidence
+                        preview = content[:80] if len(content) > 80 else content
+                        if len(content) > 80:
+                            comment_body += (
+                                f"<details>\n<summary><code>{source}</code>: {preview}...</summary>\n\n"
+                                f"```\n{content}\n```\n</details>\n\n"
+                            )
+                        else:
+                            comment_body += f"**{source}:** `{content}`\n\n"
                 comment_body += "\n"
 
             comment_body += "</details>\n"
