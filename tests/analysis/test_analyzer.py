@@ -183,23 +183,26 @@ class TestFailureAnalyzer:
         assert artifacts_dict == {}
 
     def test_build_artifacts_context_with_files(self, mocker):
-        """Test building artifacts context with files."""
+        """Test building artifacts context with artifact analyses."""
         mocker.patch("prow_failure_analysis.analysis.analyzer.dspy")
         analyzer = FailureAnalyzer()
 
-        artifacts = {
-            "cluster-state.yaml": "short content",
-            "long-file.txt": "a" * 2000,
-        }
+        from prow_failure_analysis.analysis.analyzer import ArtifactAnalysis
 
-        artifacts_dict = analyzer._build_artifacts_context(artifacts)
+        artifact_analyses = [
+            ArtifactAnalysis(artifact_path="cluster-state.yaml", key_findings="Cluster state looks normal"),
+            ArtifactAnalysis(artifact_path="long-file.txt", key_findings="Found critical error in logs"),
+        ]
+
+        artifacts_dict = analyzer._build_artifacts_context(artifact_analyses)
 
         assert "note" in artifacts_dict
-        assert "files" in artifacts_dict
-        assert "cluster-state.yaml" in artifacts_dict["files"]
-        assert artifacts_dict["files"]["cluster-state.yaml"]["content_preview"] == "short content"
-        assert artifacts_dict["files"]["long-file.txt"]["size"] == 2000
-        assert len(artifacts_dict["files"]["long-file.txt"]["content_preview"]) == 1000
+        assert "analyses" in artifacts_dict
+        assert len(artifacts_dict["analyses"]) == 2
+        assert artifacts_dict["analyses"][0]["artifact_path"] == "cluster-state.yaml"
+        assert artifacts_dict["analyses"][0]["key_findings"] == "Cluster state looks normal"
+        assert artifacts_dict["analyses"][1]["artifact_path"] == "long-file.txt"
+        assert artifacts_dict["analyses"][1]["key_findings"] == "Found critical error in logs"
 
     def test_forward_raises_on_no_failures(self, mocker):
         """Test forward raises ValueError when there are no failures."""
