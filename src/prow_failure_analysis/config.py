@@ -176,21 +176,32 @@ class Config:
             logger.warning(f"Error querying context limit: {e}, using 128K default")
             return 128000
 
-    def calculate_token_budgets(self, num_failed_steps: int, num_failed_tests: int) -> tuple[int, int]:
-        """Calculate dynamic token budgets based on number of failures."""
+    def calculate_token_budgets(
+        self, num_failed_steps: int, num_failed_tests: int, num_artifacts: int
+    ) -> tuple[int, int, int]:
+        """Calculate dynamic token budgets based on number of failures.
+
+        Returns:
+            Tuple of (tokens_per_step, tokens_per_test, tokens_per_artifact_batch)
+
+        Note: tokens_per_artifact_batch is the TOTAL budget for all artifacts in a batch,
+        not per artifact. Artifacts are batched to reduce API overhead.
+        """
         context_limit = self.detect_model_context_limit()
         available = context_limit - int(context_limit * 0.15)
 
-        if num_failed_steps == 0 and num_failed_tests == 0:
-            return (int(context_limit * 0.20), int(context_limit * 0.08))
+        if num_failed_steps == 0 and num_failed_tests == 0 and num_artifacts == 0:
+            return (int(context_limit * 0.20), int(context_limit * 0.08), int(context_limit * 0.08))
 
-        total_units = (num_failed_steps * 2) + num_failed_tests
+        # Weight: steps=2x, tests=1x, artifacts=1x total (not per artifact)
+        total_units = (num_failed_steps * 2) + num_failed_tests + 1  # 1 unit for all artifacts
         tokens_per_unit = available // total_units
 
         tokens_per_step = max(10_000, min(200_000, tokens_per_unit * 2))
         tokens_per_test = max(10_000, min(80_000, tokens_per_unit))
+        tokens_per_artifact_batch = max(20_000, min(150_000, tokens_per_unit))  # Total for all artifacts
 
-        return (tokens_per_step, tokens_per_test)
+        return (tokens_per_step, tokens_per_test, tokens_per_artifact_batch)
 
     def should_ignore_step(self, step_name: str) -> bool:
         """Check if step matches any ignore pattern."""

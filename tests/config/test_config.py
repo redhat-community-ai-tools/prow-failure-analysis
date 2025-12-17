@@ -81,10 +81,11 @@ class TestConfig:
         config.llm_model = "gpt-4"
         config.llm_provider = "openai"
 
-        tokens_per_step, tokens_per_test = config.calculate_token_budgets(1, 1)
+        tokens_per_step, tokens_per_test, tokens_per_artifact_batch = config.calculate_token_budgets(1, 1, 0)
 
         assert tokens_per_step > 0
         assert tokens_per_test > 0
+        assert tokens_per_artifact_batch > 0
         assert tokens_per_step >= tokens_per_test
 
     def test_calculate_token_budgets_enforces_limits(self):
@@ -93,12 +94,14 @@ class TestConfig:
         config.llm_model = "gpt-4"
         config.llm_provider = "openai"
 
-        tokens_per_step, tokens_per_test = config.calculate_token_budgets(1, 1)
+        tokens_per_step, tokens_per_test, tokens_per_artifact_batch = config.calculate_token_budgets(1, 1, 0)
 
         assert tokens_per_step >= 10_000
         assert tokens_per_test >= 10_000
+        assert tokens_per_artifact_batch >= 20_000
         assert tokens_per_step <= 200_000
         assert tokens_per_test <= 80_000
+        assert tokens_per_artifact_batch <= 150_000
 
     def test_extract_org_repo_section_valid_job(self):
         """Test extracting org-repo section from valid job name."""

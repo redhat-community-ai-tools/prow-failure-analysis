@@ -89,14 +89,16 @@ def _preprocess_logs(job_result: JobResult, preprocessor: LogPreprocessor, token
             step.log_path = tmp_file.name
 
 
-def _preprocess_artifacts(job_result: JobResult, preprocessor: LogPreprocessor, context_limit: int) -> None:
-    """Preprocess additional artifacts."""
+def _preprocess_artifacts(job_result: JobResult, preprocessor: LogPreprocessor, total_artifact_budget: int) -> None:
+    """Preprocess additional artifacts with dynamic per-artifact budget."""
     if not job_result.additional_artifacts:
         return
 
     num_artifacts = len(job_result.additional_artifacts)
-    tokens_per_artifact = max(1_000, int(context_limit * 0.05) // num_artifacts)
-    logger.info(f"Preprocessing {num_artifacts} artifacts ({tokens_per_artifact:,} tokens each)")
+    # Reserve 20% of budget for JSON overhead, split rest among artifacts
+    tokens_per_artifact = max(1_000, int(total_artifact_budget * 0.8) // num_artifacts)
+
+    logger.info(f"Preprocessing {num_artifacts} artifacts (~{tokens_per_artifact:,} tokens each)")
 
     for artifact_path in job_result.additional_artifacts.keys():
         content = job_result.additional_artifacts[artifact_path]
@@ -191,10 +193,16 @@ def analyze(
 
     num_failed_steps = len(job_result.failed_steps)
     num_failed_tests = len(job_result.failed_tests)
-    tokens_per_step, tokens_per_test = config.calculate_token_budgets(num_failed_steps, num_failed_tests)
+    num_artifacts = len(job_result.additional_artifacts)
+    tokens_per_step, tokens_per_test, tokens_per_artifact_batch = config.calculate_token_budgets(
+        num_failed_steps, num_failed_tests, num_artifacts
+    )
 
-    logger.info(f"Failures: {num_failed_steps} steps, {num_failed_tests} tests")
-    logger.info(f"Token budgets - steps: {tokens_per_step:,}, tests: {tokens_per_test:,}")
+    logger.info(f"Failures: {num_failed_steps} steps, {num_failed_tests} tests, {num_artifacts} artifacts")
+    logger.info(
+        f"Token budgets - steps: {tokens_per_step:,}, tests: {tokens_per_test:,}, "
+        f"artifact_batch: {tokens_per_artifact_batch:,}"
+    )
 
     preprocessor = LogPreprocessor(config=config)
     analyzer = FailureAnalyzer(
@@ -202,10 +210,11 @@ def analyze(
         config=config,
         tokens_per_step=tokens_per_step,
         tokens_per_test=tokens_per_test,
+        tokens_per_artifact_batch=tokens_per_artifact_batch,
     )
 
     _preprocess_logs(job_result, preprocessor, tokens_per_step)
-    _preprocess_artifacts(job_result, preprocessor, context_limit)
+    _preprocess_artifacts(job_result, preprocessor, tokens_per_artifact_batch)
 
     logger.info("Analyzing failures with LLM...")
     try:

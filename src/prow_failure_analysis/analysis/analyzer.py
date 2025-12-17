@@ -8,9 +8,14 @@ import dspy
 
 from ..gcs.models import JobResult, StepResult
 from ..parsing.xunit_models import FailedTest
-from .signatures import AnalyzeStepFailure, AnalyzeTestFailure, GenerateRCA
+from .signatures import AnalyzeArtifacts, AnalyzeStepFailure, AnalyzeTestFailure, GenerateRCA
 
 logger = logging.getLogger(__name__)
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimation (chars / 4)."""
+    return len(text) // 4
 
 
 @dataclass
@@ -33,6 +38,14 @@ class TestFailureAnalysis:
 
 
 @dataclass
+class ArtifactAnalysis:
+    """Analysis result for a diagnostic artifact."""
+
+    artifact_path: str
+    key_findings: str
+
+
+@dataclass
 class RCAReport:
     """Complete root cause analysis report."""
 
@@ -44,6 +57,7 @@ class RCAReport:
     category: str
     step_analyses: list[StepAnalysis]
     test_analyses: list[TestFailureAnalysis] = field(default_factory=list)
+    artifact_analyses: list[ArtifactAnalysis] = field(default_factory=list)
 
     def to_markdown(self) -> str:
         """Generate markdown formatted report."""
@@ -80,6 +94,7 @@ class FailureAnalyzer(dspy.Module):
         config: Any = None,
         tokens_per_step: int = 100_000,
         tokens_per_test: int = 50_000,
+        tokens_per_artifact_batch: int = 50_000,
     ) -> None:
         """Initialize the analyzer.
 
@@ -88,15 +103,18 @@ class FailureAnalyzer(dspy.Module):
             config: Config for token limits
             tokens_per_step: Token limit per step
             tokens_per_test: Token limit per test
+            tokens_per_artifact_batch: Total token budget per artifact batch
         """
         super().__init__()
         self.step_analyzer = dspy.ChainOfThought(AnalyzeStepFailure)
         self.test_analyzer = dspy.ChainOfThought(AnalyzeTestFailure)
+        self.artifact_analyzer = dspy.ChainOfThought(AnalyzeArtifacts)
         self.rca_generator = dspy.ChainOfThought(GenerateRCA)
         self.preprocessor = preprocessor
         self.config = config
         self.tokens_per_step = tokens_per_step
         self.tokens_per_test = tokens_per_test
+        self.tokens_per_artifact_batch = tokens_per_artifact_batch
 
     def _get_step_context(self, step: StepResult, step_graph: dict[str, Any]) -> str:
         """Extract step context from the step graph."""
@@ -196,28 +214,108 @@ class FailureAnalyzer(dspy.Module):
         logger.info(f"Analyzing {len(tests)} test failures")
         return [self._analyze_test_failure(test) for test in tests]
 
-    def _build_artifacts_context(self, additional_artifacts: dict[str, str] | None) -> dict[str, Any]:
-        """Build artifacts context for RCA generation."""
-        if not additional_artifacts:
+    def _batch_artifacts_by_tokens(self, artifacts: dict[str, str], max_tokens: int) -> list[dict[str, str]]:
+        """Split artifacts into batches that fit within token budget.
+
+        Args:
+            artifacts: Dict of artifact_path -> content
+            max_tokens: Maximum tokens per batch (includes JSON overhead)
+
+        Returns:
+            List of artifact batches, each a dict of path -> content
+        """
+        batches: list[dict[str, str]] = []
+        current_batch: dict[str, str] = {}
+        current_tokens = 100  # JSON overhead
+
+        for path, content in artifacts.items():
+            artifact_tokens = _estimate_tokens(path) + _estimate_tokens(content) + 50  # JSON overhead
+
+            # If adding this artifact would exceed limit, start new batch
+            if current_tokens + artifact_tokens > max_tokens and current_batch:
+                batches.append(current_batch)
+                current_batch = {}
+                current_tokens = 100
+
+            current_batch[path] = content
+            current_tokens += artifact_tokens
+
+        if current_batch:
+            batches.append(current_batch)
+
+        return batches
+
+    def _analyze_artifact_batch(self, batch: dict[str, str], batch_num: int) -> list[ArtifactAnalysis]:
+        """Analyze a batch of artifacts together."""
+        if not batch:
+            return []
+
+        logger.info(f"Analyzing artifact batch {batch_num} ({len(batch)} artifacts)")
+
+        try:
+            artifacts_json = json.dumps(batch, indent=2)
+            result = self.artifact_analyzer(artifacts_json=artifacts_json)
+
+            # Parse the JSON output
+            findings_list = json.loads(result.artifact_findings)
+
+            return [
+                ArtifactAnalysis(
+                    artifact_path=finding["artifact_path"],
+                    key_findings=finding["key_findings"],
+                )
+                for finding in findings_list
+            ]
+        except Exception as e:
+            logger.error(f"Artifact batch {batch_num} analysis failed: {e}")
+            # Return error entries for each artifact in the batch
+            return [
+                ArtifactAnalysis(
+                    artifact_path=path,
+                    key_findings=f"Analysis failed: {str(e)}",
+                )
+                for path in batch.keys()
+            ]
+
+    def _analyze_all_artifacts(self, artifacts: dict[str, str] | None) -> list[ArtifactAnalysis]:
+        """Analyze all diagnostic artifacts in batches."""
+        if not artifacts:
+            return []
+
+        # Split into batches respecting token limits (use 80% of budget for safety)
+        safe_batch_tokens = int(self.tokens_per_artifact_batch * 0.8)
+        batches = self._batch_artifacts_by_tokens(artifacts, safe_batch_tokens)
+
+        logger.info(f"Analyzing {len(artifacts)} artifacts in {len(batches)} batch(es)")
+
+        all_analyses = []
+        for i, batch in enumerate(batches, 1):
+            batch_analyses = self._analyze_artifact_batch(batch, i)
+            all_analyses.extend(batch_analyses)
+
+        return all_analyses
+
+    def _build_artifacts_context(self, artifact_analyses: list[ArtifactAnalysis]) -> dict[str, Any]:
+        """Build artifacts context from analyses for RCA generation."""
+        if not artifact_analyses:
             return {}
 
         return {
-            "note": "Supplemental diagnostic artifacts for context only, not primary failure sources.",
-            "files": {
-                path: {
-                    "path": path,
-                    "content_preview": content[:1000] if len(content) > 1000 else content,
-                    "size": len(content),
+            "note": "Supplemental diagnostic artifacts providing system/cluster context.",
+            "analyses": [
+                {
+                    "artifact_path": a.artifact_path,
+                    "key_findings": a.key_findings,
                 }
-                for path, content in additional_artifacts.items()
-            },
+                for a in artifact_analyses
+            ],
         }
 
     def _create_synthesis_context(
         self,
         step_analyses: list[StepAnalysis],
         test_analyses: list[TestFailureAnalysis],
-        additional_artifacts: dict[str, str] | None = None,
+        artifact_analyses: list[ArtifactAnalysis],
     ) -> tuple[str, str, str]:
         """Create unified context for RCA generation."""
         steps_dict = [
@@ -239,9 +337,9 @@ class FailureAnalyzer(dspy.Module):
             for a in test_analyses
         ]
 
-        artifacts_dict = self._build_artifacts_context(additional_artifacts)
+        artifacts_dict = self._build_artifacts_context(artifact_analyses)
 
-        artifact_count = len(artifacts_dict.get("files", {}))
+        artifact_count = len(artifacts_dict.get("analyses", []))
         logger.info(f"Synthesis: {len(steps_dict)} steps, {len(tests_dict)} tests, {artifact_count} artifacts")
 
         return json.dumps(steps_dict, indent=2), json.dumps(tests_dict, indent=2), json.dumps(artifacts_dict, indent=2)
@@ -252,6 +350,7 @@ class FailureAnalyzer(dspy.Module):
         error: Exception,
         step_analyses: list[StepAnalysis],
         test_analyses: list[TestFailureAnalysis],
+        artifact_analyses: list[ArtifactAnalysis],
     ) -> RCAReport:
         """Create report when RCA generation fails."""
         return RCAReport(
@@ -263,6 +362,7 @@ class FailureAnalyzer(dspy.Module):
             category="unknown",
             step_analyses=step_analyses,
             test_analyses=test_analyses,
+            artifact_analyses=artifact_analyses,
         )
 
     def forward(self, job_result: JobResult) -> RCAReport:
@@ -278,9 +378,10 @@ class FailureAnalyzer(dspy.Module):
 
         step_analyses = [self._analyze_step(step, job_result.step_graph) for step in job_result.failed_steps]
         test_analyses = self._analyze_all_test_failures(job_result.failed_tests)
+        artifact_analyses = self._analyze_all_artifacts(job_result.additional_artifacts)
 
         steps_json, tests_json, artifacts_json = self._create_synthesis_context(
-            step_analyses, test_analyses, job_result.additional_artifacts
+            step_analyses, test_analyses, artifact_analyses
         )
 
         logger.info("Generating overall RCA")
@@ -303,7 +404,8 @@ class FailureAnalyzer(dspy.Module):
                 category=rca.category,
                 step_analyses=step_analyses,
                 test_analyses=test_analyses,
+                artifact_analyses=artifact_analyses,
             )
         except Exception as e:
             logger.error(f"RCA generation failed: {e}")
-            return self._create_error_report(job_result, e, step_analyses, test_analyses)
+            return self._create_error_report(job_result, e, step_analyses, test_analyses, artifact_analyses)

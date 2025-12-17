@@ -49,6 +49,29 @@ class AnalyzeTestFailure(dspy.Signature):
     root_cause_summary: str = dspy.OutputField(desc="One sentence stating the immediate technical cause")
 
 
+class AnalyzeArtifacts(dspy.Signature):
+    """Analyze multiple diagnostic artifacts to extract key findings from each.
+
+    Artifacts provide supplemental context about cluster/system state.
+    They are NOT failure sources - extract relevant environmental details.
+
+    IMPORTANT: Content has been preprocessed with semantic anomaly detection.
+    - Only anomalous/unusual sections are shown
+    - May be wrapped in XML tags: <block lines="X-Y" score="S">...</block>
+
+    Process each artifact independently and return findings for each.
+    """
+
+    artifacts_json: str = dspy.InputField(desc="JSON string of dict mapping artifact paths to preprocessed content")
+
+    artifact_findings: str = dspy.OutputField(
+        desc=(
+            "JSON list of {artifact_path: str, key_findings: str} for each artifact. "
+            "key_findings should be 2-3 sentences summarizing relevant details or anomalies."
+        )
+    )
+
+
 class GenerateRCA(dspy.Signature):
     """Generate a professional, concise root cause analysis for pipeline failures.
 
