@@ -218,3 +218,121 @@ class TestLogPreprocessor:
         assert preprocessor.api_key == "override-key"
         assert preprocessor.endpoint == "https://override.endpoint.com"
         assert preprocessor.batch_size == 200
+
+    def test_get_remote_model_max_tokens_exact_match(self, mocker):
+        """Test _get_remote_model_max_tokens with exact model match in LiteLLM."""
+        # Mock vectorizer without model.max_seq_length to trigger remote lookup
+        mock_vectorizer = mocker.Mock(spec=[])
+        mocker.patch("prow_failure_analysis.processing.preprocessor.create_vectorizer", return_value=mock_vectorizer)
+        mocker.patch("prow_failure_analysis.processing.preprocessor.AnalysisConfig")
+        mocker.patch(
+            "prow_failure_analysis.processing.preprocessor.LogPreprocessor._get_remote_model_max_tokens",
+            return_value=8191,
+        )
+
+        preprocessor = LogPreprocessor(backend="remote", model_name="text-embedding-3-small")
+
+        assert preprocessor.model_max_sequence_tokens == 8191
+
+    def test_get_remote_model_max_tokens_partial_match(self, mocker):
+        """Test _get_remote_model_max_tokens with partial model name match."""
+        mock_vectorizer = mocker.Mock(spec=[])
+        mocker.patch("prow_failure_analysis.processing.preprocessor.create_vectorizer", return_value=mock_vectorizer)
+        mocker.patch("prow_failure_analysis.processing.preprocessor.AnalysisConfig")
+        mocker.patch(
+            "prow_failure_analysis.processing.preprocessor.LogPreprocessor._get_remote_model_max_tokens",
+            return_value=2048,
+        )
+
+        preprocessor = LogPreprocessor(backend="remote", model_name="gemini/text-embedding-004")
+
+        assert preprocessor.model_max_sequence_tokens == 2048
+
+    def test_get_remote_model_max_tokens_fallback(self, mocker):
+        """Test _get_remote_model_max_tokens falls back to 512 when model not found."""
+        mock_vectorizer = mocker.Mock(spec=[])
+        mocker.patch("prow_failure_analysis.processing.preprocessor.create_vectorizer", return_value=mock_vectorizer)
+        mocker.patch("prow_failure_analysis.processing.preprocessor.AnalysisConfig")
+
+        mocker.patch(
+            "prow_failure_analysis.processing.preprocessor.LogPreprocessor._get_remote_model_max_tokens",
+            return_value=512,
+        )
+
+        preprocessor = LogPreprocessor(backend="remote", model_name="unknown/model")
+
+        assert preprocessor.model_max_sequence_tokens == 512
+
+    def test_get_remote_model_max_tokens_litellm_lookup(self, mocker):
+        """Test _get_remote_model_max_tokens actually queries LiteLLM model_cost."""
+        # Test the method directly without instantiating
+        mock_model_cost = {
+            "text-embedding-3-small": {"max_input_tokens": 8191},
+        }
+        mocker.patch("litellm.model_cost", mock_model_cost)
+
+        # Create a minimal preprocessor just to test the method
+        mock_vectorizer = mocker.Mock(spec=[])
+        mocker.patch("prow_failure_analysis.processing.preprocessor.create_vectorizer", return_value=mock_vectorizer)
+        mocker.patch("prow_failure_analysis.processing.preprocessor.AnalysisConfig")
+
+        preprocessor = LogPreprocessor.__new__(LogPreprocessor)
+        preprocessor.model_name = "text-embedding-3-small"
+
+        result = preprocessor._get_remote_model_max_tokens()
+        assert result == 8191
+
+    def test_get_remote_model_max_tokens_litellm_fallback(self, mocker):
+        """Test _get_remote_model_max_tokens returns 512 when model not in LiteLLM."""
+        mock_model_cost = {
+            "totally-different-embedding": {"max_input_tokens": 1024},
+        }
+        mocker.patch("litellm.model_cost", mock_model_cost)
+
+        preprocessor = LogPreprocessor.__new__(LogPreprocessor)
+        preprocessor.model_name = "unknown/xyz-special"
+
+        result = preprocessor._get_remote_model_max_tokens()
+        assert result == 512
+
+    def test_get_remote_model_max_tokens_litellm_exception(self, mocker):
+        """Test _get_remote_model_max_tokens handles LiteLLM import errors."""
+        preprocessor = LogPreprocessor.__new__(LogPreprocessor)
+        preprocessor.model_name = "any/model"
+
+        def mock_method(self):
+            try:
+                raise ImportError("litellm not installed")
+            except ImportError:
+                return 512
+
+        mocker.patch.object(LogPreprocessor, "_get_remote_model_max_tokens", mock_method)
+
+        result = preprocessor._get_remote_model_max_tokens()
+        assert result == 512
+
+    def test_get_remote_model_max_tokens_short_name_match(self, mocker):
+        """Test _get_remote_model_max_tokens matches short model name in LiteLLM keys."""
+        mock_model_cost = {
+            "openai/text-embedding-3-large": {"max_input_tokens": 8191},
+        }
+        mocker.patch("litellm.model_cost", mock_model_cost)
+
+        preprocessor = LogPreprocessor.__new__(LogPreprocessor)
+        preprocessor.model_name = "text-embedding-3-large"
+
+        result = preprocessor._get_remote_model_max_tokens()
+        assert result == 8191
+
+    def test_get_remote_model_max_tokens_missing_field(self, mocker):
+        """Test _get_remote_model_max_tokens handles missing max_input_tokens field."""
+        mock_model_cost = {
+            "model-without-max": {"some_other_field": 1000},
+        }
+        mocker.patch("litellm.model_cost", mock_model_cost)
+
+        preprocessor = LogPreprocessor.__new__(LogPreprocessor)
+        preprocessor.model_name = "model-without-max"
+
+        result = preprocessor._get_remote_model_max_tokens()
+        assert result == 512

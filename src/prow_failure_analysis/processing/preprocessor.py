@@ -76,8 +76,34 @@ class LogPreprocessor:
             self.model_max_sequence_tokens = self.vectorizer.model.max_seq_length
             logger.info(f"Embedding model max sequence length: {self.model_max_sequence_tokens} tokens")
         else:
-            self.model_max_sequence_tokens = 256
-            logger.warning(f"Using default embedding model max sequence length: {self.model_max_sequence_tokens}")
+            self.model_max_sequence_tokens = self._get_remote_model_max_tokens()
+            logger.info(f"Using remote model max sequence length: {self.model_max_sequence_tokens} tokens")
+
+    def _get_remote_model_max_tokens(self) -> int:
+        """Get max sequence tokens for remote embedding models from LiteLLM database."""
+        try:
+            from litellm import model_cost
+
+            if self.model_name in model_cost:
+                max_input = model_cost[self.model_name].get("max_input_tokens")
+                if max_input:
+                    logger.info(f"LiteLLM: {self.model_name} max_input_tokens={max_input}")
+                    return int(max_input)
+
+            model_short = self.model_name.split("/")[-1] if "/" in self.model_name else self.model_name
+            for model_key in model_cost.keys():
+                if model_short in model_key or model_key.endswith(model_short):
+                    max_input = model_cost[model_key].get("max_input_tokens")
+                    if max_input:
+                        logger.info(f"LiteLLM: matched {model_key} max_input_tokens={max_input}")
+                        return int(max_input)
+
+            logger.warning(f"Model {self.model_name} not found in LiteLLM database, using 512 default")
+        except Exception as e:
+            logger.warning(f"Failed to query LiteLLM for embedding limits: {e}")
+        # fallback to 512 tokens
+        logger.warning("Using fallback max sequence length: 512 tokens")
+        return 512
 
     def _build_cordon_config(self) -> AnalysisConfig:
         """Build cordon AnalysisConfig with appropriate parameters for the backend."""

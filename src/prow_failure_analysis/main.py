@@ -218,7 +218,7 @@ def analyze(
 
     logger.info("Analyzing failures with LLM...")
     try:
-        report = analyzer.forward(job_result)
+        report = analyzer(job_result)
     except Exception as e:
         logger.error(f"Analysis failed: {e}")
         sys.exit(1)

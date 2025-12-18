@@ -24,6 +24,28 @@ def _estimate_tokens(text: str) -> int:
     return len(text) // 4
 
 
+def _sanitize_json_string(text: str) -> str:
+    """Sanitize JSON string by escaping unescaped control characters.
+
+    LLMs often return JSON with literal newlines/tabs inside strings instead of
+    properly escaped \\n and \\t sequences. This causes json.loads() to fail with
+    "Invalid control character" errors.
+    """
+    import re
+
+    # Find all string values in the JSON and escape control characters within them
+    # This regex matches JSON string values (content between quotes, handling escapes)
+    def escape_control_chars(match: re.Match[str]) -> str:
+        content = match.group(1)
+        content = content.replace("\n", "\\n")
+        content = content.replace("\r", "\\r")
+        content = content.replace("\t", "\\t")
+        content = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", content)
+        return f'"{content}"'
+
+    return re.sub(r'"((?:[^"\\]|\\.)*)(?<!\\)"', escape_control_chars, text)
+
+
 @dataclass
 class StepAnalysis:
     """Analysis result for a single step."""
@@ -90,14 +112,9 @@ class RCAReport:
                         source = item.get("source", "unknown")
                         content = item.get("content", "").replace("`", "'").strip()
 
-                        # Add source label
-                        parts.append(f"**{source}:**\n\n")
-
-                        # Format content based on length/structure
-                        if "\n" in content or len(content) > 100:
-                            parts.append(f"```\n{content}\n```\n\n")
-                        else:
-                            parts.append(f"`{content}`\n\n")
+                        # Use expandable details - only show source in summary
+                        parts.append(f"<details>\n<summary><code>{source}</code></summary>\n\n")
+                        parts.append(f"```\n{content}\n```\n</details>\n\n")
 
         markdown_output = "".join(parts)
 
@@ -191,7 +208,10 @@ class FailureAnalyzer(dspy.Module):
                 # Parse evidence JSON
                 evidence_list = []
                 try:
-                    evidence_list = json.loads(result.evidence)
+                    raw_evidence = result.evidence or "[]"
+                    # Sanitize control characters that LLMs often include unescaped
+                    sanitized_evidence = _sanitize_json_string(raw_evidence)
+                    evidence_list = json.loads(sanitized_evidence)
                     if not isinstance(evidence_list, list):
                         evidence_list = []
                 except (json.JSONDecodeError, TypeError) as e:
@@ -209,7 +229,7 @@ class FailureAnalyzer(dspy.Module):
                 if attempt < max_retries:
                     delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
                     logger.warning(
-                        f"Step {step.name} attempt {attempt}/{max_retries} failed: {e}. " f"Retrying in {delay:.1f}s..."
+                        f"Step {step.name} attempt {attempt}/{max_retries} failed: {e}. Retrying in {delay:.1f}s..."
                     )
                     time.sleep(delay)
                 else:
@@ -331,6 +351,9 @@ class FailureAnalyzer(dspy.Module):
 
         if not cleaned:
             raise json.JSONDecodeError("Response contained only markdown formatting", "", 0)
+
+        # Sanitize control characters that LLMs often include unescaped
+        cleaned = _sanitize_json_string(cleaned)
 
         findings_list = json.loads(cleaned)
 
