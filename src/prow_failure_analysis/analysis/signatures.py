@@ -68,14 +68,18 @@ class AnalyzeArtifacts(dspy.Signature):
     - May be wrapped in XML tags: <block lines="X-Y" score="S">...</block>
 
     Process each artifact independently and return findings for each.
+    You MUST return a valid JSON array even if artifacts are empty or have no findings.
     """
 
     artifacts_json: str = dspy.InputField(desc="JSON string of dict mapping artifact paths to preprocessed content")
 
     artifact_findings: str = dspy.OutputField(
         desc=(
-            "JSON list of {artifact_path: str, key_findings: str} for each artifact. "
-            "key_findings should be 2-3 sentences summarizing relevant details or anomalies."
+            'Return a valid JSON array. Each element must have "artifact_path" and "key_findings" keys. '
+            'Example: [{"artifact_path": "path/file.json", "key_findings": "Found X pods in error."}]. '
+            "key_findings should be 2-3 sentences summarizing relevant details or anomalies. "
+            "If an artifact has no relevant findings, set key_findings to 'No significant findings.' "
+            "ALWAYS return valid JSON - never return empty or malformed responses."
         )
     )
 

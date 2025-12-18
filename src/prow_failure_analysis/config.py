@@ -26,6 +26,11 @@ class Config:
     llm_base_url: str | None = field(default_factory=lambda: os.getenv("LLM_BASE_URL"))
 
     cordon_device: str = field(default_factory=lambda: os.getenv("CORDON_DEVICE", "cpu"))
+    cordon_backend: str = field(default_factory=lambda: os.getenv("CORDON_BACKEND", "sentence-transformers"))
+    cordon_model_name: str = field(default_factory=lambda: os.getenv("CORDON_MODEL_NAME", "all-MiniLM-L6-v2"))
+    cordon_api_key: str | None = field(default_factory=lambda: os.getenv("CORDON_API_KEY"))
+    cordon_endpoint: str | None = field(default_factory=lambda: os.getenv("CORDON_ENDPOINT"))
+    cordon_batch_size: int = field(default_factory=lambda: int(os.getenv("CORDON_BATCH_SIZE", "32")))
 
     github_token: str | None = field(default_factory=lambda: os.getenv("GITHUB_TOKEN"))
     post_pr_comment: bool = False

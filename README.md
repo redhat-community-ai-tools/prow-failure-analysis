@@ -46,8 +46,13 @@ export GCS_CREDS_PATH="/path/to/creds.json"     # for authenticated access
 # LLM configuration
 export LLM_BASE_URL="https://custom.api.com"    # custom API endpoint
 
-# Preprocessing
+# Preprocessing (cordon configuration)
 export CORDON_DEVICE="cpu"                      # cordon device: "cpu", "cuda", "mps"
+export CORDON_BACKEND="sentence-transformers"   # backend: "sentence-transformers", "llama-cpp", or "remote"
+export CORDON_MODEL_NAME="all-MiniLM-L6-v2"     # model name (HuggingFace or provider/model for remote)
+export CORDON_API_KEY="your-embedding-api-key"  # API key for remote embeddings (optional)
+export CORDON_ENDPOINT="https://api.example.com/embeddings"  # custom endpoint for remote (optional)
+export CORDON_BATCH_SIZE="100"                  # batch size for embeddings (default: 32, higher = faster)
 
 # Filtering
 export IGNORED_STEPS="gather-*,setup-*"         # glob patterns for steps to ignore
@@ -126,6 +131,27 @@ Large logs are preprocessed using [cordon](https://github.com/calebevans/cordon)
 - Identifies semantically unusual log sections (not just error keywords)
 - Filters out repetitive normal operations while preserving unique failures
 - Reduces log size while keeping the signal
+
+**Embedding Backend Options:**
+
+Cordon supports multiple embedding backends:
+
+```bash
+# Local sentence-transformers (default, no API key required)
+export CORDON_BACKEND="sentence-transformers"
+export CORDON_MODEL_NAME="all-MiniLM-L6-v2"
+
+# Remote embeddings via API (OpenAI, Cohere, etc.)
+export CORDON_BACKEND="remote"
+export CORDON_MODEL_NAME="openai/text-embedding-3-small"
+export CORDON_API_KEY="sk-..."
+
+# Custom endpoint for remote embeddings
+export CORDON_BACKEND="remote"
+export CORDON_MODEL_NAME="custom/model"
+export CORDON_API_KEY="your-key"
+export CORDON_ENDPOINT="https://your-embedding-api.com/v1/embeddings"
+```
 
 ### 3. LLM Analysis
 

@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,10 @@ from ..security.leak_detector import LeakDetector
 from .signatures import AnalyzeArtifacts, AnalyzeStepFailure, AnalyzeTestFailure, GenerateRCA
 
 logger = logging.getLogger(__name__)
+
+# Retry configuration for transient LLM failures
+MAX_RETRIES = 3
+RETRY_BASE_DELAY = 2.0  # seconds
 
 
 def _estimate_tokens(text: str) -> int:
@@ -126,7 +131,8 @@ class FailureAnalyzer(dspy.Module):
         super().__init__()
         self.step_analyzer = dspy.ChainOfThought(AnalyzeStepFailure)
         self.test_analyzer = dspy.ChainOfThought(AnalyzeTestFailure)
-        self.artifact_analyzer = dspy.ChainOfThought(AnalyzeArtifacts)
+        # Use Predict for artifacts - simpler and more stable for JSON output
+        self.artifact_analyzer = dspy.Predict(AnalyzeArtifacts)
         self.rca_generator = dspy.ChainOfThought(GenerateRCA)
         self.preprocessor = preprocessor
         self.config = config
@@ -164,47 +170,64 @@ class FailureAnalyzer(dspy.Module):
             logger.error(f"Failed to read log from {step.log_path}: {e}")
             return "(No log content available)"
 
-    def _analyze_step(self, step: StepResult, step_graph: dict[str, Any]) -> StepAnalysis:
-        """Analyze a single failed step."""
+    def _analyze_step(
+        self, step: StepResult, step_graph: dict[str, Any], max_retries: int = MAX_RETRIES
+    ) -> StepAnalysis:
+        """Analyze a single failed step with retry logic."""
         logger.info(f"Analyzing step: {step.name}")
 
         step_context = self._get_step_context(step, step_graph)
         log_content = self._read_log_content(step)
 
-        try:
-            result = self.step_analyzer(
-                step_name=step.name,
-                log_content=log_content,
-                step_context=step_context,
-            )
-
-            # Parse evidence JSON
-            evidence_list = []
+        last_error: Exception | None = None
+        for attempt in range(1, max_retries + 1):
             try:
-                evidence_list = json.loads(result.evidence)
-                if not isinstance(evidence_list, list):
-                    evidence_list = []
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.warning(f"Failed to parse evidence JSON for {step.name}: {e}")
+                result = self.step_analyzer(
+                    step_name=step.name,
+                    log_content=log_content,
+                    step_context=step_context,
+                )
+
+                # Parse evidence JSON
                 evidence_list = []
+                try:
+                    evidence_list = json.loads(result.evidence)
+                    if not isinstance(evidence_list, list):
+                        evidence_list = []
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.warning(f"Failed to parse evidence JSON for {step.name}: {e}")
+                    evidence_list = []
 
-            return StepAnalysis(
-                step_name=step.name,
-                failure_category=result.failure_category,
-                root_cause=result.root_cause,
-                evidence=evidence_list,
-            )
-        except Exception as e:
-            logger.error(f"Step {step.name}: analysis failed: {e}")
-            return StepAnalysis(
-                step_name=step.name,
-                failure_category="unknown",
-                root_cause=f"Analysis failed: {str(e)}",
-                evidence=[],
-            )
+                return StepAnalysis(
+                    step_name=step.name,
+                    failure_category=result.failure_category,
+                    root_cause=result.root_cause,
+                    evidence=evidence_list,
+                )
+            except (json.JSONDecodeError, KeyError) as e:
+                last_error = e
+                if attempt < max_retries:
+                    delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                    logger.warning(
+                        f"Step {step.name} attempt {attempt}/{max_retries} failed: {e}. " f"Retrying in {delay:.1f}s..."
+                    )
+                    time.sleep(delay)
+                else:
+                    logger.error(f"Step {step.name} failed after {max_retries} attempts: {e}")
+            except Exception as e:
+                logger.error(f"Step {step.name}: analysis failed: {e}")
+                last_error = e
+                break
 
-    def _analyze_test_failure(self, test: FailedTest) -> TestFailureAnalysis:
-        """Analyze a single test failure."""
+        return StepAnalysis(
+            step_name=step.name,
+            failure_category="unknown",
+            root_cause=f"Analysis failed: {str(last_error)}",
+            evidence=[],
+        )
+
+    def _analyze_test_failure(self, test: FailedTest, max_retries: int = MAX_RETRIES) -> TestFailureAnalysis:
+        """Analyze a single test failure with retry logic."""
         logger.info(f"Analyzing test: {test.test_identifier}")
 
         details = test.combined_details
@@ -213,26 +236,42 @@ class FailureAnalyzer(dspy.Module):
                 details, f"test:{test.test_identifier}", max_tokens=self.tokens_per_test
             )
 
-        try:
-            result = self.test_analyzer(
-                test_identifier=test.test_identifier,
-                failure_type=test.failure_type or test.error_type or "Unknown",
-                failure_message=test.failure_message or test.error_message or "No message",
-                failure_details=details,
-            )
+        last_error: Exception | None = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                result = self.test_analyzer(
+                    test_identifier=test.test_identifier,
+                    failure_type=test.failure_type or test.error_type or "Unknown",
+                    failure_message=test.failure_message or test.error_message or "No message",
+                    failure_details=details,
+                )
 
-            return TestFailureAnalysis(
-                test_identifier=test.test_identifier,
-                source_file=test.source_file,
-                root_cause_summary=result.root_cause_summary,
-            )
-        except Exception as e:
-            logger.error(f"Test {test.test_identifier}: analysis failed: {e}")
-            return TestFailureAnalysis(
-                test_identifier=test.test_identifier,
-                source_file=test.source_file,
-                root_cause_summary=f"Analysis failed: {str(e)}",
-            )
+                return TestFailureAnalysis(
+                    test_identifier=test.test_identifier,
+                    source_file=test.source_file,
+                    root_cause_summary=result.root_cause_summary,
+                )
+            except (json.JSONDecodeError, KeyError) as e:
+                last_error = e
+                if attempt < max_retries:
+                    delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                    logger.warning(
+                        f"Test {test.test_identifier} attempt {attempt}/{max_retries} failed: {e}. "
+                        f"Retrying in {delay:.1f}s..."
+                    )
+                    time.sleep(delay)
+                else:
+                    logger.error(f"Test {test.test_identifier} failed after {max_retries} attempts: {e}")
+            except Exception as e:
+                logger.error(f"Test {test.test_identifier}: analysis failed: {e}")
+                last_error = e
+                break
+
+        return TestFailureAnalysis(
+            test_identifier=test.test_identifier,
+            source_file=test.source_file,
+            root_cause_summary=f"Analysis failed: {str(last_error)}",
+        )
 
     def _analyze_all_test_failures(self, tests: list[FailedTest]) -> list[TestFailureAnalysis]:
         """Analyze all test failures."""
@@ -273,37 +312,92 @@ class FailureAnalyzer(dspy.Module):
 
         return batches
 
-    def _analyze_artifact_batch(self, batch: dict[str, str], batch_num: int) -> list[ArtifactAnalysis]:
-        """Analyze a batch of artifacts together."""
+    def _parse_artifact_findings(self, raw_findings: str, batch_num: int) -> list[dict[str, str]]:
+        """Parse and validate artifact findings JSON with fallback handling."""
+        if not raw_findings or not raw_findings.strip():
+            raise json.JSONDecodeError("Empty response from LLM", "", 0)
+
+        # Clean up common LLM response issues
+        cleaned = raw_findings.strip()
+
+        # Remove markdown code blocks if present
+        if cleaned.startswith("```json"):
+            cleaned = cleaned[7:]
+        if cleaned.startswith("```"):
+            cleaned = cleaned[3:]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]
+        cleaned = cleaned.strip()
+
+        if not cleaned:
+            raise json.JSONDecodeError("Response contained only markdown formatting", "", 0)
+
+        findings_list = json.loads(cleaned)
+
+        if not isinstance(findings_list, list):
+            raise ValueError(f"Expected JSON array, got {type(findings_list).__name__}")
+
+        # Validate each finding has required keys
+        for i, finding in enumerate(findings_list):
+            if not isinstance(finding, dict):
+                raise ValueError(f"Finding {i} is not a dict: {type(finding).__name__}")
+            if "artifact_path" not in finding:
+                raise KeyError(f"Finding {i} missing 'artifact_path'")
+            if "key_findings" not in finding:
+                raise KeyError(f"Finding {i} missing 'key_findings'")
+
+        return findings_list
+
+    def _analyze_artifact_batch(
+        self, batch: dict[str, str], batch_num: int, max_retries: int = MAX_RETRIES
+    ) -> list[ArtifactAnalysis]:
+        """Analyze a batch of artifacts together with retry logic."""
         if not batch:
             return []
 
         logger.info(f"Analyzing artifact batch {batch_num} ({len(batch)} artifacts)")
+        artifacts_json = json.dumps(batch, indent=2)
 
-        try:
-            artifacts_json = json.dumps(batch, indent=2)
-            result = self.artifact_analyzer(artifacts_json=artifacts_json)
+        last_error: Exception | None = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                result = self.artifact_analyzer(artifacts_json=artifacts_json)
 
-            # Parse the JSON output
-            findings_list = json.loads(result.artifact_findings)
+                # Get the raw response and log it for debugging if it fails
+                raw_findings = getattr(result, "artifact_findings", None)
+                if raw_findings is None:
+                    raise ValueError("No artifact_findings in response")
 
-            return [
-                ArtifactAnalysis(
-                    artifact_path=finding["artifact_path"],
-                    key_findings=finding["key_findings"],
-                )
-                for finding in findings_list
-            ]
-        except Exception as e:
-            logger.error(f"Artifact batch {batch_num} analysis failed: {e}")
-            # Return error entries for each artifact in the batch
-            return [
-                ArtifactAnalysis(
-                    artifact_path=path,
-                    key_findings=f"Analysis failed: {str(e)}",
-                )
-                for path in batch.keys()
-            ]
+                # Parse and validate the JSON output
+                findings_list = self._parse_artifact_findings(raw_findings, batch_num)
+
+                return [
+                    ArtifactAnalysis(
+                        artifact_path=finding["artifact_path"],
+                        key_findings=finding["key_findings"],
+                    )
+                    for finding in findings_list
+                ]
+            except (KeyError, ValueError) as e:  # ValueError includes JSONDecodeError
+                last_error = e
+                if attempt < max_retries:
+                    delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))  # Exponential backoff
+                    logger.warning(
+                        f"Artifact batch {batch_num} attempt {attempt}/{max_retries} failed: {e}. "
+                        f"Retrying in {delay:.1f}s..."
+                    )
+                    time.sleep(delay)
+                else:
+                    logger.error(f"Artifact batch {batch_num} failed after {max_retries} attempts: {e}")
+
+        # Return error entries for each artifact in the batch
+        return [
+            ArtifactAnalysis(
+                artifact_path=path,
+                key_findings=f"Analysis failed: {str(last_error)}",
+            )
+            for path in batch.keys()
+        ]
 
     def _analyze_all_artifacts(self, artifacts: dict[str, str] | None) -> list[ArtifactAnalysis]:
         """Analyze all diagnostic artifacts in batches."""

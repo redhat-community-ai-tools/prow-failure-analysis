@@ -22,8 +22,11 @@ class LogPreprocessor:
         safety_margin: float = 0.4,
         k_neighbors: int = 5,
         min_percentile: float = 0.05,
-        model_name: str = "all-MiniLM-L6-v2",
-        backend: str = "sentence-transformers",
+        model_name: str | None = None,
+        backend: str | None = None,
+        api_key: str | None = None,
+        endpoint: str | None = None,
+        batch_size: int | None = None,
     ) -> None:
         """Initialize the preprocessor.
 
@@ -34,16 +37,24 @@ class LogPreprocessor:
             safety_margin: Window size safety margin (0.0-1.0, lower = more conservative)
             k_neighbors: Number of neighbors for anomaly detection
             min_percentile: Minimum percentage of lines to keep
-            model_name: Sentence-transformers model name
-            backend: Embedding backend ('sentence-transformers' or 'llama-cpp')
+            model_name: Model name (HuggingFace for sentence-transformers, provider/model for remote)
+            backend: Embedding backend ('sentence-transformers', 'llama-cpp', or 'remote')
+            api_key: API key for remote embeddings (falls back to env vars)
+            endpoint: Custom API endpoint URL for remote backend
+            batch_size: Batch size for embedding generation (higher = faster but more memory)
         """
         self.config = config
         self.last_lines_to_keep = last_lines_to_keep
         self.safety_margin = safety_margin
         self.k_neighbors = k_neighbors
         self.min_percentile = min_percentile
-        self.model_name = model_name
-        self.backend = backend
+
+        # Resolve backend settings from config or arguments
+        self.backend = backend or (config.cordon_backend if config else "sentence-transformers")
+        self.model_name = model_name or (config.cordon_model_name if config else "all-MiniLM-L6-v2")
+        self.api_key = api_key or (config.cordon_api_key if config else None)
+        self.endpoint = endpoint or (config.cordon_endpoint if config else None)
+        self.batch_size = batch_size or (config.cordon_batch_size if config else 32)
 
         self.device = config.cordon_device if config and device is None else (device or "cpu")
 
@@ -58,7 +69,7 @@ class LogPreprocessor:
             self.size_threshold = 50_000
             logger.info("No config provided, using default token limits")
 
-        cordon_config = AnalysisConfig(device=self.device, model_name=model_name, backend=backend)
+        cordon_config = self._build_cordon_config()
         self.vectorizer = create_vectorizer(cordon_config)
 
         if hasattr(self.vectorizer, "model") and hasattr(self.vectorizer.model, "max_seq_length"):
@@ -67,6 +78,45 @@ class LogPreprocessor:
         else:
             self.model_max_sequence_tokens = 256
             logger.warning(f"Using default embedding model max sequence length: {self.model_max_sequence_tokens}")
+
+    def _build_cordon_config(self) -> AnalysisConfig:
+        """Build cordon AnalysisConfig with appropriate parameters for the backend."""
+        return self._build_analysis_config()
+
+    def _build_analysis_config(
+        self, window_size: int | None = None, anomaly_percentile: float | None = None
+    ) -> AnalysisConfig:
+        """Build cordon AnalysisConfig with appropriate parameters for the backend.
+
+        Args:
+            window_size: Override window size (used during analysis)
+            anomaly_percentile: Override anomaly percentile (used during analysis)
+        """
+        config_kwargs: dict[str, Any] = {
+            "device": self.device,
+            "model_name": self.model_name,
+            "backend": self.backend,
+            "batch_size": self.batch_size,
+        }
+
+        # Add analysis-specific parameters if provided
+        if window_size is not None:
+            config_kwargs["window_size"] = window_size
+        if anomaly_percentile is not None:
+            config_kwargs["anomaly_percentile"] = anomaly_percentile
+            config_kwargs["k_neighbors"] = self.k_neighbors
+
+        # Add remote backend options if applicable
+        if self.backend == "remote":
+            if self.api_key:
+                config_kwargs["api_key"] = self.api_key
+            if self.endpoint:
+                config_kwargs["endpoint"] = self.endpoint
+            logger.info(f"Using remote embedding backend: {self.model_name} (batch_size={self.batch_size})")
+        else:
+            logger.info(f"Using {self.backend} embedding backend: {self.model_name}")
+
+        return AnalysisConfig(**config_kwargs)
 
     def _estimate_tokens(self, text: str) -> int:
         """Estimate token count using model's tokenizer or fallback to char-based estimation."""
@@ -131,14 +181,8 @@ class LogPreprocessor:
 
             logger.info(f"Step {step_name}: max_line_tokens={max_line_tokens}, window_size={window_size}")
 
-            config = AnalysisConfig(
-                window_size=window_size,
-                k_neighbors=self.k_neighbors,
-                anomaly_percentile=target_percentile,
-                device=self.device,
-                backend="sentence-transformers",
-            )
-            analyzer = SemanticLogAnalyzer(config)
+            analysis_config = self._build_analysis_config(window_size, target_percentile)
+            analyzer = SemanticLogAnalyzer(analysis_config)
 
             with tempfile.NamedTemporaryFile(mode="w", suffix=".log", delete=False) as tmp_file:
                 tmp_path = Path(tmp_file.name)

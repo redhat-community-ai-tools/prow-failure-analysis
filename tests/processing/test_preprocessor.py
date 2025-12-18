@@ -98,6 +98,11 @@ class TestLogPreprocessor:
         mocker.patch("prow_failure_analysis.processing.preprocessor.create_vectorizer")
         mock_config = mocker.Mock()
         mock_config.cordon_device = "cuda"
+        mock_config.cordon_backend = "sentence-transformers"
+        mock_config.cordon_model_name = "all-MiniLM-L6-v2"
+        mock_config.cordon_api_key = None
+        mock_config.cordon_endpoint = None
+        mock_config.cordon_batch_size = 32
         mock_config.detect_model_context_limit.return_value = 100_000
 
         preprocessor = LogPreprocessor(config=mock_config)
@@ -125,3 +130,91 @@ class TestLogPreprocessor:
         result = preprocessor.preprocess("small content")
 
         assert result == "small content"
+
+    def test_init_with_remote_backend_config(self, mocker):
+        """Test initialization with remote backend config."""
+        mocker.patch("prow_failure_analysis.processing.preprocessor.create_vectorizer")
+        mocker.patch("prow_failure_analysis.processing.preprocessor.AnalysisConfig")
+        mock_config = mocker.Mock()
+        mock_config.cordon_device = "cpu"
+        mock_config.cordon_backend = "remote"
+        mock_config.cordon_model_name = "openai/text-embedding-3-small"
+        mock_config.cordon_api_key = "test-api-key"
+        mock_config.cordon_endpoint = "https://api.example.com/embeddings"
+        mock_config.cordon_batch_size = 100
+        mock_config.detect_model_context_limit.return_value = 100_000
+
+        preprocessor = LogPreprocessor(config=mock_config)
+
+        assert preprocessor.backend == "remote"
+        assert preprocessor.model_name == "openai/text-embedding-3-small"
+        assert preprocessor.api_key == "test-api-key"
+        assert preprocessor.endpoint == "https://api.example.com/embeddings"
+        assert preprocessor.batch_size == 100
+
+    def test_init_with_remote_backend_args(self, mocker):
+        """Test initialization with remote backend via arguments."""
+        mocker.patch("prow_failure_analysis.processing.preprocessor.create_vectorizer")
+        mocker.patch("prow_failure_analysis.processing.preprocessor.AnalysisConfig")
+
+        preprocessor = LogPreprocessor(
+            backend="remote",
+            model_name="cohere/embed-english-v3.0",
+            api_key="arg-api-key",
+            endpoint="https://custom.endpoint.com",
+        )
+
+        assert preprocessor.backend == "remote"
+        assert preprocessor.model_name == "cohere/embed-english-v3.0"
+        assert preprocessor.api_key == "arg-api-key"
+        assert preprocessor.endpoint == "https://custom.endpoint.com"
+
+    def test_build_analysis_config_remote_backend(self, mocker):
+        """Test _build_analysis_config includes remote options."""
+        mocker.patch("prow_failure_analysis.processing.preprocessor.create_vectorizer")
+        mock_analysis_config = mocker.patch("prow_failure_analysis.processing.preprocessor.AnalysisConfig")
+
+        preprocessor = LogPreprocessor(
+            backend="remote",
+            model_name="openai/text-embedding-ada-002",
+            api_key="test-key",
+            endpoint="https://api.openai.com/v1/embeddings",
+        )
+
+        # Reset mocks to verify the analysis config call
+        mock_analysis_config.reset_mock()
+        preprocessor._build_analysis_config(window_size=4, anomaly_percentile=0.1)
+
+        mock_analysis_config.assert_called_once()
+        call_kwargs = mock_analysis_config.call_args.kwargs
+        assert call_kwargs["backend"] == "remote"
+        assert call_kwargs["api_key"] == "test-key"
+        assert call_kwargs["endpoint"] == "https://api.openai.com/v1/embeddings"
+
+    def test_args_override_config(self, mocker):
+        """Test that explicit arguments override config values."""
+        mocker.patch("prow_failure_analysis.processing.preprocessor.create_vectorizer")
+        mocker.patch("prow_failure_analysis.processing.preprocessor.AnalysisConfig")
+        mock_config = mocker.Mock()
+        mock_config.cordon_device = "cuda"
+        mock_config.cordon_backend = "sentence-transformers"
+        mock_config.cordon_model_name = "all-MiniLM-L6-v2"
+        mock_config.cordon_api_key = "config-key"
+        mock_config.cordon_endpoint = "https://config.endpoint.com"
+        mock_config.cordon_batch_size = 32
+        mock_config.detect_model_context_limit.return_value = 100_000
+
+        preprocessor = LogPreprocessor(
+            config=mock_config,
+            backend="remote",
+            model_name="custom/model",
+            api_key="override-key",
+            endpoint="https://override.endpoint.com",
+            batch_size=200,
+        )
+
+        assert preprocessor.backend == "remote"
+        assert preprocessor.model_name == "custom/model"
+        assert preprocessor.api_key == "override-key"
+        assert preprocessor.endpoint == "https://override.endpoint.com"
+        assert preprocessor.batch_size == 200
