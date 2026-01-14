@@ -328,28 +328,34 @@ class GCSClient:
 
         return all_failed_tests
 
-    def _is_binary_file(self, path: str) -> bool:
-        """Check if file is a binary/archive type."""
-        binary_extensions = {
-            ".tar",
-            ".gz",
-            ".zip",
-            ".tgz",
-            ".bz2",
-            ".xz",
-            ".7z",
-            ".bin",
-            ".exe",
-            ".png",
-            ".jpg",
-            ".jpeg",
-            ".gif",
-            ".pdf",
+    def _is_text_file(self, path: str) -> bool:
+        """Check if file is a text/data file we want to analyze."""
+        text_extensions = {
+            ".json",
+            ".xml",
+            ".txt",
+            ".log",
+            ".yaml",
+            ".yml",
+            ".toml",
+            ".ini",
+            ".cfg",
+            ".conf",
+            ".properties",
+            ".env",
+            ".csv",
         }
-        return any(path.lower().endswith(ext) for ext in binary_extensions)
+        return any(path.lower().endswith(ext) for ext in text_extensions)
 
-    def _fetch_artifacts_for_pattern(self, pattern: str, artifacts_prefix: str) -> tuple[dict[str, str], int, int]:
+    def _fetch_artifacts_for_pattern(
+        self, pattern: str, artifacts_prefix: str, max_depth: int = 3
+    ) -> tuple[dict[str, str], int, int]:
         """Fetch artifacts matching a single pattern.
+
+        Args:
+            pattern: Glob pattern ending with /*
+            artifacts_prefix: Base path prefix for artifacts
+            max_depth: Maximum directory depth to search (default 2)
 
         Returns:
             Tuple of (artifacts_dict, total_checked, matched_count)
@@ -359,28 +365,41 @@ class GCSClient:
 
         dir_part = pattern[:-2]
         search_prefix = f"{artifacts_prefix}{dir_part}/"
-        logger.debug(f"Fetching files from: {dir_part}")
+        logger.debug(f"Fetching files from: {dir_part} (max_depth={max_depth})")
 
-        blobs = self.client.list_blobs(self.bucket_name, prefix=search_prefix, delimiter="/")
+        blobs = self.client.list_blobs(self.bucket_name, prefix=search_prefix)
 
         artifacts = {}
         total = 0
         matched = 0
+        skipped_depth = 0
 
         for blob in blobs:
             total += 1
             if blob.name.endswith("/"):
                 continue
 
+            # Check depth: count slashes after search_prefix
+            relative_to_pattern = blob.name[len(search_prefix) :]
+            depth = relative_to_pattern.count("/")
+            if depth >= max_depth:
+                skipped_depth += 1
+                continue
+
             relative_path = blob.name[len(artifacts_prefix) :]
-            if self._is_binary_file(relative_path):
+            if not self._is_text_file(relative_path):
                 continue
 
             content = self._fetch_blob_text(blob.name)
             if content:
                 artifacts[relative_path] = content
                 matched += 1
+                if matched % 10 == 0:
+                    logger.info(f"Fetched {matched} artifacts...")
                 logger.debug(f"Included artifact: {relative_path} ({len(content)} bytes)")
+
+        if skipped_depth > 0:
+            logger.info(f"Skipped {skipped_depth} files beyond depth {max_depth}")
 
         return artifacts, total, matched
 
