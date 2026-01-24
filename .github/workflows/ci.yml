@@ -119,3 +119,25 @@ jobs:
           subject-name: quay.io/rh_ee_caevans/prow-failure-analysis
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
+
+  analyze-failure:
+    name: Analyze workflow failure
+    needs: [test, pre-commit, container]
+    if: always() && contains(needs.*.result, 'failure')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Analyze failure
+        uses: calebevans/gha-failure-analysis@v0.1.6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          llm-provider: gemini
+          llm-model: gemini-2.5-flash-lite
+          llm-api-key: ${{ secrets.GEMINI_API_KEY }}
+          cordon-backend: remote
+          cordon-model-name: gemini/gemini-embedding-001
+          cordon-api-key: ${{ secrets.GEMINI_API_KEY }}
+          post-pr-comment: true
