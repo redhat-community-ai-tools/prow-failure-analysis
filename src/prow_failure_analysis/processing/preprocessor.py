@@ -7,6 +7,7 @@ from cordon import AnalysisConfig, SemanticLogAnalyzer
 from cordon.embedding import create_vectorizer
 
 from ..constants import CHARS_PER_TOKEN
+from ..utils import retry_with_backoff
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,10 @@ class LogPreprocessor:
         self.model_name = model_name or (config.cordon_model_name if config else "all-MiniLM-L6-v2")
         self.api_key = api_key or (config.cordon_api_key if config else None)
         self.endpoint = endpoint or (config.cordon_endpoint if config else None)
-        self.batch_size = batch_size or (config.cordon_batch_size if config else 32)
+
+        # Use smaller batch size for remote backends to avoid rate limits
+        default_batch_size = 10 if self.backend == "remote" else 32
+        self.batch_size = batch_size or (config.cordon_batch_size if config else default_batch_size)
 
         self.device = config.cordon_device if config and device is None else (device or "cpu")
 
@@ -154,6 +158,31 @@ class LogPreprocessor:
                 pass
         return len(text) // CHARS_PER_TOKEN
 
+    @retry_with_backoff(max_retries=3, rate_limit_delay=6.0, context_errors_no_retry=False)
+    def _run_cordon_analysis(self, content_to_process: str, window_size: int, target_percentile: float) -> str:
+        """Run cordon analysis with retry handling.
+
+        Args:
+            content_to_process: Log content to analyze
+            window_size: Window size for analysis
+            target_percentile: Target percentile for keeping lines
+
+        Returns:
+            Reduced log content
+        """
+        analysis_config = self._build_analysis_config(window_size, target_percentile)
+        analyzer = SemanticLogAnalyzer(analysis_config)
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".log", delete=False) as tmp_file:
+            tmp_path = Path(tmp_file.name)
+            tmp_file.write(content_to_process)
+
+        try:
+            result: str = analyzer.analyze_file(tmp_path)
+            return result
+        finally:
+            tmp_path.unlink()
+
     def preprocess_file(self, log_path: str, step_name: str = "unknown", max_tokens: int | None = None) -> str:
         """Preprocess a log file, applying cordon if it exceeds size threshold.
 
@@ -207,17 +236,8 @@ class LogPreprocessor:
 
             logger.info(f"Step {step_name}: max_line_tokens={max_line_tokens}, window_size={window_size}")
 
-            analysis_config = self._build_analysis_config(window_size, target_percentile)
-            analyzer = SemanticLogAnalyzer(analysis_config)
-
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".log", delete=False) as tmp_file:
-                tmp_path = Path(tmp_file.name)
-                tmp_file.write(content_to_process)
-
-            try:
-                reduced_content = analyzer.analyze_file(tmp_path)
-            finally:
-                tmp_path.unlink()
+            # Call cordon analysis with automatic retry handling
+            reduced_content = self._run_cordon_analysis(content_to_process, window_size, target_percentile)
 
             if last_lines:
                 reduced_content = reduced_content.rstrip() + "\n\n--- FINAL OUTPUT ---\n" + "\n".join(last_lines)
@@ -227,8 +247,7 @@ class LogPreprocessor:
 
             logger.info(f"Step {step_name}: reduced {estimated_tokens} → {final_tokens} tokens ({reduction_pct:.1f}%)")
 
-            result: str = reduced_content
-            return result
+            return reduced_content
 
         except Exception as e:
             logger.error(f"Step {step_name}: preprocessing failed: {e}, returning original")

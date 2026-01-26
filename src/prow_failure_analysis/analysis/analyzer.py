@@ -1,6 +1,5 @@
 import json
 import logging
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -10,13 +9,10 @@ import dspy
 from ..gcs.models import JobResult, StepResult
 from ..parsing.xunit_models import FailedTest
 from ..security.leak_detector import LeakDetector
+from ..utils import retry_with_backoff
 from .signatures import AnalyzeArtifacts, AnalyzeStepFailure, AnalyzeTestFailure, GenerateRCA
 
 logger = logging.getLogger(__name__)
-
-# Retry configuration for transient LLM failures
-MAX_RETRIES = 3
-RETRY_BASE_DELAY = 2.0  # seconds
 
 
 def _estimate_tokens(text: str) -> int:
@@ -187,67 +183,67 @@ class FailureAnalyzer(dspy.Module):
             logger.error(f"Failed to read log from {step.log_path}: {e}")
             return "(No log content available)"
 
-    def _analyze_step(
-        self, step: StepResult, step_graph: dict[str, Any], max_retries: int = MAX_RETRIES
-    ) -> StepAnalysis:
-        """Analyze a single failed step with retry logic."""
+    @retry_with_backoff(max_retries=3, base_delay=2.0, rate_limit_delay=10.0)
+    def _call_step_analyzer(self, step_name: str, log_content: str, step_context: str) -> Any:
+        """Call DSPy step analyzer with retry handling."""
+        return self.step_analyzer(
+            step_name=step_name,
+            log_content=log_content,
+            step_context=step_context,
+        )
+
+    def _analyze_step(self, step: StepResult, step_graph: dict[str, Any]) -> StepAnalysis:
+        """Analyze a single failed step with automatic retry logic."""
         logger.info(f"Analyzing step: {step.name}")
 
         step_context = self._get_step_context(step, step_graph)
         log_content = self._read_log_content(step)
 
-        last_error: Exception | None = None
-        for attempt in range(1, max_retries + 1):
+        try:
+            result = self._call_step_analyzer(step.name, log_content, step_context)
+
+            # Parse evidence JSON
+            evidence_list = []
             try:
-                result = self.step_analyzer(
-                    step_name=step.name,
-                    log_content=log_content,
-                    step_context=step_context,
-                )
-
-                # Parse evidence JSON
-                evidence_list = []
-                try:
-                    raw_evidence = result.evidence or "[]"
-                    # Sanitize control characters that LLMs often include unescaped
-                    sanitized_evidence = _sanitize_json_string(raw_evidence)
-                    evidence_list = json.loads(sanitized_evidence)
-                    if not isinstance(evidence_list, list):
-                        evidence_list = []
-                except (json.JSONDecodeError, TypeError) as e:
-                    logger.warning(f"Failed to parse evidence JSON for {step.name}: {e}")
+                raw_evidence = result.evidence or "[]"
+                # Sanitize control characters that LLMs often include unescaped
+                sanitized_evidence = _sanitize_json_string(raw_evidence)
+                evidence_list = json.loads(sanitized_evidence)
+                if not isinstance(evidence_list, list):
                     evidence_list = []
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning(f"Failed to parse evidence JSON for {step.name}: {e}")
+                evidence_list = []
 
-                return StepAnalysis(
-                    step_name=step.name,
-                    failure_category=result.failure_category,
-                    root_cause=result.root_cause,
-                    evidence=evidence_list,
-                )
-            except (json.JSONDecodeError, KeyError) as e:
-                last_error = e
-                if attempt < max_retries:
-                    delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
-                    logger.warning(
-                        f"Step {step.name} attempt {attempt}/{max_retries} failed: {e}. Retrying in {delay:.1f}s..."
-                    )
-                    time.sleep(delay)
-                else:
-                    logger.error(f"Step {step.name} failed after {max_retries} attempts: {e}")
-            except Exception as e:
-                logger.error(f"Step {step.name}: analysis failed: {e}")
-                last_error = e
-                break
+            return StepAnalysis(
+                step_name=step.name,
+                failure_category=result.failure_category,
+                root_cause=result.root_cause,
+                evidence=evidence_list,
+            )
+        except Exception as e:
+            logger.error(f"Step {step.name}: analysis failed after all retries: {e}")
+            return StepAnalysis(
+                step_name=step.name,
+                failure_category="unknown",
+                root_cause=f"Analysis failed: {str(e)}",
+                evidence=[],
+            )
 
-        return StepAnalysis(
-            step_name=step.name,
-            failure_category="unknown",
-            root_cause=f"Analysis failed: {str(last_error)}",
-            evidence=[],
+    @retry_with_backoff(max_retries=3, base_delay=2.0, rate_limit_delay=10.0)
+    def _call_test_analyzer(
+        self, test_identifier: str, failure_type: str, failure_message: str, failure_details: str
+    ) -> Any:
+        """Call DSPy test analyzer with retry handling."""
+        return self.test_analyzer(
+            test_identifier=test_identifier,
+            failure_type=failure_type,
+            failure_message=failure_message,
+            failure_details=failure_details,
         )
 
-    def _analyze_test_failure(self, test: FailedTest, max_retries: int = MAX_RETRIES) -> TestFailureAnalysis:
-        """Analyze a single test failure with retry logic."""
+    def _analyze_test_failure(self, test: FailedTest) -> TestFailureAnalysis:
+        """Analyze a single test failure with automatic retry logic."""
         logger.info(f"Analyzing test: {test.test_identifier}")
 
         details = test.combined_details
@@ -256,42 +252,26 @@ class FailureAnalyzer(dspy.Module):
                 details, f"test:{test.test_identifier}", max_tokens=self.tokens_per_test
             )
 
-        last_error: Exception | None = None
-        for attempt in range(1, max_retries + 1):
-            try:
-                result = self.test_analyzer(
-                    test_identifier=test.test_identifier,
-                    failure_type=test.failure_type or test.error_type or "Unknown",
-                    failure_message=test.failure_message or test.error_message or "No message",
-                    failure_details=details,
-                )
+        try:
+            result = self._call_test_analyzer(
+                test.test_identifier,
+                test.failure_type or test.error_type or "Unknown",
+                test.failure_message or test.error_message or "No message",
+                details,
+            )
 
-                return TestFailureAnalysis(
-                    test_identifier=test.test_identifier,
-                    source_file=test.source_file,
-                    root_cause_summary=result.root_cause_summary,
-                )
-            except (json.JSONDecodeError, KeyError) as e:
-                last_error = e
-                if attempt < max_retries:
-                    delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
-                    logger.warning(
-                        f"Test {test.test_identifier} attempt {attempt}/{max_retries} failed: {e}. "
-                        f"Retrying in {delay:.1f}s..."
-                    )
-                    time.sleep(delay)
-                else:
-                    logger.error(f"Test {test.test_identifier} failed after {max_retries} attempts: {e}")
-            except Exception as e:
-                logger.error(f"Test {test.test_identifier}: analysis failed: {e}")
-                last_error = e
-                break
-
-        return TestFailureAnalysis(
-            test_identifier=test.test_identifier,
-            source_file=test.source_file,
-            root_cause_summary=f"Analysis failed: {str(last_error)}",
-        )
+            return TestFailureAnalysis(
+                test_identifier=test.test_identifier,
+                source_file=test.source_file,
+                root_cause_summary=result.root_cause_summary,
+            )
+        except Exception as e:
+            logger.error(f"Test {test.test_identifier}: analysis failed after all retries: {e}")
+            return TestFailureAnalysis(
+                test_identifier=test.test_identifier,
+                source_file=test.source_file,
+                root_cause_summary=f"Analysis failed: {str(e)}",
+            )
 
     def _analyze_all_test_failures(self, tests: list[FailedTest]) -> list[TestFailureAnalysis]:
         """Analyze all test failures."""
@@ -313,16 +293,35 @@ class FailureAnalyzer(dspy.Module):
         """
         batches: list[dict[str, str]] = []
         current_batch: dict[str, str] = {}
-        current_tokens = 100  # JSON overhead
+        current_tokens = 500  # Conservative JSON overhead estimate
+
+        # Use only 60% of max_tokens to leave room for the prompt and output
+        safe_max_tokens = int(max_tokens * 0.60)
 
         for path, content in artifacts.items():
-            artifact_tokens = _estimate_tokens(path) + _estimate_tokens(content) + 50  # JSON overhead
+            # Be more conservative with token estimation (multiply by 1.2 safety factor)
+            artifact_tokens = int((_estimate_tokens(path) + _estimate_tokens(content) + 100) * 1.2)
+
+            # If a single artifact is too large, split it into its own batch
+            if artifact_tokens > safe_max_tokens:
+                # If there's a current batch, save it first
+                if current_batch:
+                    batches.append(current_batch)
+                    current_batch = {}
+                    current_tokens = 500
+
+                # Put the large artifact in its own batch (will be caught by safety check)
+                batches.append({path: content})
+                logger.warning(
+                    f"Artifact {path} is very large ({artifact_tokens:,} tokens), " "placing in separate batch"
+                )
+                continue
 
             # If adding this artifact would exceed limit, start new batch
-            if current_tokens + artifact_tokens > max_tokens and current_batch:
+            if current_tokens + artifact_tokens > safe_max_tokens and current_batch:
                 batches.append(current_batch)
                 current_batch = {}
-                current_tokens = 100
+                current_tokens = 500
 
             current_batch[path] = content
             current_tokens += artifact_tokens
@@ -371,56 +370,65 @@ class FailureAnalyzer(dspy.Module):
 
         return findings_list
 
-    def _analyze_artifact_batch(
-        self, batch: dict[str, str], batch_num: int, max_retries: int = MAX_RETRIES
-    ) -> list[ArtifactAnalysis]:
-        """Analyze a batch of artifacts together with retry logic."""
+    @retry_with_backoff(max_retries=3, base_delay=2.0, rate_limit_delay=10.0, context_errors_no_retry=True)
+    def _call_artifact_analyzer(self, artifacts_json: str) -> Any:
+        """Call DSPy artifact analyzer with retry handling."""
+        return self.artifact_analyzer(artifacts_json=artifacts_json)
+
+    def _analyze_artifact_batch(self, batch: dict[str, str], batch_num: int) -> list[ArtifactAnalysis]:
+        """Analyze a batch of artifacts together with automatic retry logic."""
         if not batch:
             return []
 
         logger.info(f"Analyzing artifact batch {batch_num} ({len(batch)} artifacts)")
         artifacts_json = json.dumps(batch, indent=2)
 
-        last_error: Exception | None = None
-        for attempt in range(1, max_retries + 1):
-            try:
-                result = self.artifact_analyzer(artifacts_json=artifacts_json)
-
-                # Get the raw response and log it for debugging if it fails
-                raw_findings = getattr(result, "artifact_findings", None)
-                if raw_findings is None:
-                    raise ValueError("No artifact_findings in response")
-
-                # Parse and validate the JSON output
-                findings_list = self._parse_artifact_findings(raw_findings, batch_num)
-
+        # Check if the batch itself is too large (safety check)
+        batch_tokens = _estimate_tokens(artifacts_json)
+        # Use 90% of context limit as absolute max for a single batch
+        if self.config:
+            max_batch_tokens = int(self.config.detect_model_context_limit() * 0.90)
+            if batch_tokens > max_batch_tokens:
+                logger.error(
+                    f"Artifact batch {batch_num} exceeds safe token limit "
+                    f"({batch_tokens:,} > {max_batch_tokens:,} tokens). Skipping analysis."
+                )
                 return [
                     ArtifactAnalysis(
-                        artifact_path=finding["artifact_path"],
-                        key_findings=finding["key_findings"],
+                        artifact_path=path,
+                        key_findings="Artifact too large for analysis (exceeds context window)",
                     )
-                    for finding in findings_list
+                    for path in batch.keys()
                 ]
-            except (KeyError, ValueError) as e:  # ValueError includes JSONDecodeError
-                last_error = e
-                if attempt < max_retries:
-                    delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))  # Exponential backoff
-                    logger.warning(
-                        f"Artifact batch {batch_num} attempt {attempt}/{max_retries} failed: {e}. "
-                        f"Retrying in {delay:.1f}s..."
-                    )
-                    time.sleep(delay)
-                else:
-                    logger.error(f"Artifact batch {batch_num} failed after {max_retries} attempts: {e}")
 
-        # Return error entries for each artifact in the batch
-        return [
-            ArtifactAnalysis(
-                artifact_path=path,
-                key_findings=f"Analysis failed: {str(last_error)}",
-            )
-            for path in batch.keys()
-        ]
+        try:
+            result = self._call_artifact_analyzer(artifacts_json)
+
+            # Get the raw response and log it for debugging if it fails
+            raw_findings = getattr(result, "artifact_findings", None)
+            if raw_findings is None:
+                raise ValueError("No artifact_findings in response")
+
+            # Parse and validate the JSON output
+            findings_list = self._parse_artifact_findings(raw_findings, batch_num)
+
+            return [
+                ArtifactAnalysis(
+                    artifact_path=finding["artifact_path"],
+                    key_findings=finding["key_findings"],
+                )
+                for finding in findings_list
+            ]
+        except Exception as e:
+            logger.error(f"Artifact batch {batch_num}: analysis failed after all retries: {e}")
+            # Return error entries for each artifact in the batch
+            return [
+                ArtifactAnalysis(
+                    artifact_path=path,
+                    key_findings=f"Analysis failed: {str(e)}",
+                )
+                for path in batch.keys()
+            ]
 
     def _analyze_all_artifacts(self, artifacts: dict[str, str] | None) -> list[ArtifactAnalysis]:
         """Analyze all diagnostic artifacts in batches."""
@@ -510,6 +518,26 @@ class FailureAnalyzer(dspy.Module):
             artifact_analyses=artifact_analyses,
         )
 
+    @retry_with_backoff(max_retries=3, base_delay=2.0, rate_limit_delay=10.0)
+    def _call_rca_generator(
+        self,
+        job_name: str,
+        build_id: str,
+        pr_number: str,
+        failed_steps_analysis: str,
+        failed_tests_analysis: str,
+        additional_context: str,
+    ) -> Any:
+        """Call DSPy RCA generator with retry handling."""
+        return self.rca_generator(
+            job_name=job_name,
+            build_id=build_id,
+            pr_number=pr_number,
+            failed_steps_analysis=failed_steps_analysis,
+            failed_tests_analysis=failed_tests_analysis,
+            additional_context=additional_context,
+        )
+
     def forward(self, job_result: JobResult) -> RCAReport:
         """Analyze job failures and generate RCA report.
 
@@ -531,13 +559,13 @@ class FailureAnalyzer(dspy.Module):
 
         logger.info("Generating overall RCA")
         try:
-            rca = self.rca_generator(
-                job_name=job_result.job_name,
-                build_id=job_result.build_id,
-                pr_number=job_result.pr_number or "N/A",
-                failed_steps_analysis=steps_json,
-                failed_tests_analysis=tests_json,
-                additional_context=artifacts_json,
+            rca = self._call_rca_generator(
+                job_result.job_name,
+                job_result.build_id,
+                job_result.pr_number or "N/A",
+                steps_json,
+                tests_json,
+                artifacts_json,
             )
 
             return RCAReport(
@@ -552,5 +580,5 @@ class FailureAnalyzer(dspy.Module):
                 artifact_analyses=artifact_analyses,
             )
         except Exception as e:
-            logger.error(f"RCA generation failed: {e}")
+            logger.error(f"RCA generation failed after all retries: {e}")
             return self._create_error_report(job_result, e, step_analyses, test_analyses, artifact_analyses)

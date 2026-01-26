@@ -30,6 +30,8 @@ class Config:
     cordon_model_name: str = field(default_factory=lambda: os.getenv("CORDON_MODEL_NAME", "all-MiniLM-L6-v2"))
     cordon_api_key: str | None = field(default_factory=lambda: os.getenv("CORDON_API_KEY"))
     cordon_endpoint: str | None = field(default_factory=lambda: os.getenv("CORDON_ENDPOINT"))
+    # Default batch size: 10 for remote backends (to avoid rate limits), 32 for local
+    # For Gemini API with 5000 requests/minute limit, use batch_size <= 10
     cordon_batch_size: int = field(default_factory=lambda: int(os.getenv("CORDON_BATCH_SIZE", "32")))
 
     github_token: str | None = field(default_factory=lambda: os.getenv("GITHUB_TOKEN"))

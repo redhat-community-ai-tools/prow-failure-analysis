@@ -91,6 +91,8 @@ def _preprocess_logs(job_result: JobResult, preprocessor: LogPreprocessor, token
 
 def _preprocess_artifacts(job_result: JobResult, preprocessor: LogPreprocessor, total_artifact_budget: int) -> None:
     """Preprocess additional artifacts with dynamic per-artifact budget."""
+    import time
+
     if not job_result.additional_artifacts:
         return
 
@@ -100,10 +102,15 @@ def _preprocess_artifacts(job_result: JobResult, preprocessor: LogPreprocessor, 
 
     logger.info(f"Preprocessing {num_artifacts} artifacts (~{tokens_per_artifact:,} tokens each)")
 
-    for artifact_path in job_result.additional_artifacts.keys():
+    for i, artifact_path in enumerate(job_result.additional_artifacts.keys()):
         content = job_result.additional_artifacts[artifact_path]
         processed = preprocessor.preprocess(content, f"artifact:{artifact_path}", max_tokens=tokens_per_artifact)
         job_result.additional_artifacts[artifact_path] = processed
+
+        # Add a small delay between artifacts to avoid rate limit bursts
+        # Only delay if using remote backend and not the last artifact
+        if preprocessor.backend == "remote" and i < num_artifacts - 1:
+            time.sleep(0.5)  # 500ms delay between artifacts
 
 
 def _cleanup_temp_files(job_result: JobResult) -> None:
