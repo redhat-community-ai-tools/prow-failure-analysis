@@ -373,6 +373,7 @@ class GCSClient:
         total = 0
         matched = 0
         skipped_depth = 0
+        skipped_excluded = 0
 
         for blob in blobs:
             total += 1
@@ -387,6 +388,13 @@ class GCSClient:
                 continue
 
             relative_path = blob.name[len(artifacts_prefix) :]
+
+            # Apply exclusion filter before downloading content
+            if self.config and self.config.should_exclude_artifact(relative_path):
+                skipped_excluded += 1
+                logger.debug(f"Excluded artifact: {relative_path}")
+                continue
+
             if not self._is_text_file(relative_path):
                 continue
 
@@ -400,6 +408,9 @@ class GCSClient:
 
         if skipped_depth > 0:
             logger.info(f"Skipped {skipped_depth} files beyond depth {max_depth}")
+
+        if skipped_excluded > 0:
+            logger.info(f"Excluded {skipped_excluded} artifacts matching exclude patterns")
 
         return artifacts, total, matched
 
@@ -420,6 +431,11 @@ class GCSClient:
             return {}
 
         logger.info(f"Searching for artifacts matching: {', '.join(patterns)}")
+
+        if self.config.excluded_artifacts_patterns:
+            exclude_pats = [p.strip() for p in self.config.excluded_artifacts_patterns if p.strip()]
+            if exclude_pats:
+                logger.info(f"Excluding artifacts matching: {', '.join(exclude_pats)}")
 
         artifacts_prefix = f"{base_path}/artifacts/"
         all_artifacts = {}

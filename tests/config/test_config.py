@@ -75,6 +75,56 @@ class TestConfig:
         assert config.should_include_artifact_path("config.yaml") is True
         assert config.should_include_artifact_path("test/random.txt") is False
 
+    def test_should_exclude_artifact_no_patterns(self):
+        """Test should_exclude_artifact returns False when no patterns configured."""
+        config = Config()
+
+        assert config.should_exclude_artifact("stage/step/pods/cert-manager-abc/log.txt") is False
+
+    def test_should_exclude_artifact_simple_match(self):
+        """Test should_exclude_artifact returns True for a matching exclusion pattern."""
+        config = Config()
+        config.excluded_artifacts_patterns = ["cert-manager*"]
+
+        assert config.should_exclude_artifact("stage/step/pods/cert-manager-controller-abc/log.txt") is True
+        assert config.should_exclude_artifact("stage/step/pods/my-service-abc/log.txt") is False
+
+    def test_should_exclude_artifact_negation_overrides_exclusion(self):
+        """Test that ! negation patterns override exclusion patterns."""
+        config = Config()
+        config.excluded_artifacts_patterns = ["openshift-*", "!openshift-pipelines*"]
+
+        # openshift-console matches exclude, no keep match -> excluded
+        assert config.should_exclude_artifact("pods/openshift-console-abc/log.txt") is True
+        # openshift-pipelines matches exclude AND keep -> kept
+        assert config.should_exclude_artifact("pods/openshift-pipelines-ctrl-abc/log.txt") is False
+        # no match at all -> kept
+        assert config.should_exclude_artifact("pods/my-service/log.txt") is False
+
+    def test_should_exclude_artifact_combined_patterns(self):
+        """Test the full real-world pattern set from the CI use case."""
+        config = Config()
+        config.excluded_artifacts_patterns = [
+            "cert-manager*",
+            "knative-eventing*",
+            "openshift-*",
+            "!openshift-pipelines*",
+        ]
+
+        assert config.should_exclude_artifact("pods/cert-manager-controller-abc/log.txt") is True
+        assert config.should_exclude_artifact("pods/knative-eventing-webhook-xyz/log.txt") is True
+        assert config.should_exclude_artifact("pods/openshift-console-abc/log.txt") is True
+        assert config.should_exclude_artifact("pods/openshift-pipelines-ctrl-abc/log.txt") is False
+        assert config.should_exclude_artifact("pods/my-app-service/log.txt") is False
+
+    def test_should_exclude_artifact_only_negation_patterns(self):
+        """Test that only negation patterns (no exclude patterns) excludes nothing."""
+        config = Config()
+        config.excluded_artifacts_patterns = ["!openshift-pipelines*"]
+
+        assert config.should_exclude_artifact("pods/openshift-console-abc/log.txt") is False
+        assert config.should_exclude_artifact("pods/anything/log.txt") is False
+
     def test_calculate_token_budgets_steps_weighted_higher(self):
         """Test steps get 2x weight compared to tests."""
         config = Config()

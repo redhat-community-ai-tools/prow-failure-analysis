@@ -1,6 +1,7 @@
 import json
 from datetime import datetime
 
+from prow_failure_analysis.config import Config
 from prow_failure_analysis.gcs.client import GCSClient
 
 
@@ -201,3 +202,68 @@ class TestGCSClient:
         # Should only include the allowed step
         assert len(result) == 1
         assert "base/artifacts/stage/allowed-step/junit.xml" in result
+
+    def test_fetch_artifacts_for_pattern_excludes_matching_artifacts(self, mocker) -> None:
+        """Test _fetch_artifacts_for_pattern skips artifacts that match exclude patterns."""
+        mocker.patch("prow_failure_analysis.gcs.client.storage")
+        config = Config()
+        config.excluded_artifacts_patterns = ["cert-manager*", "openshift-*", "!openshift-pipelines*"]
+        client = GCSClient(bucket_name="test-bucket", config=config)
+
+        artifacts_prefix = "logs/job/123/artifacts/"
+
+        def create_blob(name: str):
+            blob = mocker.Mock()
+            blob.name = name
+            return blob
+
+        mock_blobs = [
+            create_blob(f"{artifacts_prefix}e2e/gather/pods/cert-manager-controller-abc/log.txt"),
+            create_blob(f"{artifacts_prefix}e2e/gather/pods/openshift-console-xyz/log.txt"),
+            create_blob(f"{artifacts_prefix}e2e/gather/pods/openshift-pipelines-ctrl-abc/log.txt"),
+            create_blob(f"{artifacts_prefix}e2e/gather/pods/my-app-service/log.txt"),
+        ]
+
+        client.client.list_blobs = mocker.Mock(return_value=mock_blobs)
+        client._fetch_blob_text = mocker.Mock(return_value="log content here")
+
+        artifacts, _total, matched = client._fetch_artifacts_for_pattern("e2e/gather/pods/*", artifacts_prefix)
+
+        # cert-manager and openshift-console should be excluded
+        # openshift-pipelines should be kept (negation override)
+        # my-app-service should be kept (no exclude match)
+        assert matched == 2
+        assert "e2e/gather/pods/openshift-pipelines-ctrl-abc/log.txt" in artifacts
+        assert "e2e/gather/pods/my-app-service/log.txt" in artifacts
+        assert "e2e/gather/pods/cert-manager-controller-abc/log.txt" not in artifacts
+        assert "e2e/gather/pods/openshift-console-xyz/log.txt" not in artifacts
+
+        # _fetch_blob_text should only be called for the 2 non-excluded artifacts
+        assert client._fetch_blob_text.call_count == 2
+
+    def test_fetch_artifacts_for_pattern_no_exclusion_without_config(self, mocker) -> None:
+        """Test _fetch_artifacts_for_pattern fetches all artifacts when no config/exclusion set."""
+        mocker.patch("prow_failure_analysis.gcs.client.storage")
+        client = GCSClient(bucket_name="test-bucket")
+
+        artifacts_prefix = "logs/job/123/artifacts/"
+
+        def create_blob(name: str):
+            blob = mocker.Mock()
+            blob.name = name
+            return blob
+
+        mock_blobs = [
+            create_blob(f"{artifacts_prefix}e2e/gather/pods/cert-manager-abc/log.txt"),
+            create_blob(f"{artifacts_prefix}e2e/gather/pods/my-service/log.txt"),
+        ]
+
+        client.client.list_blobs = mocker.Mock(return_value=mock_blobs)
+        client._fetch_blob_text = mocker.Mock(return_value="log content")
+
+        artifacts, _total, matched = client._fetch_artifacts_for_pattern("e2e/gather/pods/*", artifacts_prefix)
+
+        # Both should be included since no exclusion patterns
+        assert matched == 2
+        assert "e2e/gather/pods/cert-manager-abc/log.txt" in artifacts
+        assert "e2e/gather/pods/my-service/log.txt" in artifacts
