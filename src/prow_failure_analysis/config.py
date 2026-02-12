@@ -47,6 +47,12 @@ class Config:
         )
     )
 
+    excluded_artifacts_patterns: list[str] = field(
+        default_factory=lambda: (
+            os.getenv("EXCLUDED_ARTIFACTS", "").split(",") if os.getenv("EXCLUDED_ARTIFACTS") else []
+        )
+    )
+
     def validate(self) -> list[str]:
         """Validate configuration and return list of errors."""
         errors = []
@@ -223,3 +229,46 @@ class Config:
             for pattern in self.included_artifacts_patterns
             if pattern.strip()
         )
+
+    def should_exclude_artifact(self, artifact_path: str) -> bool:
+        """Check if an artifact path should be excluded based on exclude patterns.
+
+        Patterns prefixed with ! are negation (keep) patterns that act as exceptions
+        to exclusion. Patterns are matched against each path component of the artifact
+        path using fnmatch.
+
+        An artifact is excluded if:
+        - Any path component matches any exclusion pattern, AND
+        - No path component matches any negation (!) pattern.
+
+        Args:
+            artifact_path: Relative path of the artifact (e.g. "stage/step/pods/cert-manager-xyz/log.txt")
+
+        Returns:
+            True if the artifact should be excluded, False otherwise.
+        """
+        if not self.excluded_artifacts_patterns:
+            return False
+
+        exclude_pats = []
+        keep_pats = []
+        for p in self.excluded_artifacts_patterns:
+            p = p.strip()
+            if not p:
+                continue
+            if p.startswith("!"):
+                keep_pats.append(p[1:])
+            else:
+                exclude_pats.append(p)
+
+        if not exclude_pats:
+            return False
+
+        components = artifact_path.split("/")
+
+        matches_exclude = any(fnmatch.fnmatch(component, pat) for component in components for pat in exclude_pats)
+        if not matches_exclude:
+            return False
+
+        matches_keep = any(fnmatch.fnmatch(component, pat) for component in components for pat in keep_pats)
+        return not matches_keep
