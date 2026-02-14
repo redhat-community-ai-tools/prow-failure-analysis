@@ -1,7 +1,11 @@
 import logging
+import os
 import sys
 import tempfile
 from pathlib import Path
+
+# Suppress tqdm progress bars (must be set before any tqdm import)
+os.environ["TQDM_DISABLE"] = "1"
 
 import click
 import dspy

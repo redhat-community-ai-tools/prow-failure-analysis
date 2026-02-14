@@ -1,0 +1,8 @@
+[
+{% for path, content in artifacts.items() %}
+  {
+    "artifact_path": {{ path | tojson }},
+    "key_findings": {{ gen("Summarize the key findings from this diagnostic artifact in 2-3 sentences. STRICT RULES: 1) ONLY describe errors, anomalies, or details that are DIRECTLY VISIBLE in the content below. 2) Quote or closely paraphrase actual text from the content. 3) Do NOT invent, fabricate, or hallucinate ANY specific details such as usernames, IP addresses, error codes, port numbers, file paths, timestamps, service names, or percentages that do not appear in the content. If a specific detail like an IP address, hostname, or service name is not visible in the content, do NOT guess -- either omit it or say the specific value is unknown. 4) If the content contains no meaningful errors or anomalies, respond with exactly 'No significant findings.' Artifact path: {path}. Content: {content}") }}
+  }{% if not loop.last %},{% endif %}
+{% endfor %}
+]
