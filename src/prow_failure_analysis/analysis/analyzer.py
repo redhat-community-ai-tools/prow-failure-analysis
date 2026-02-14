@@ -5,12 +5,14 @@ from pathlib import Path
 from typing import Any
 
 import dspy
+from genji import LLMBackend as GenjiBackend
+from genji import Template as GenjiTemplate
 
 from ..gcs.models import JobResult, StepResult
 from ..parsing.xunit_models import FailedTest
 from ..security.leak_detector import LeakDetector
 from ..utils import retry_with_backoff
-from .signatures import AnalyzeArtifacts, AnalyzeStepFailure, AnalyzeTestFailure, GenerateRCA
+from .signatures import AnalyzeStepFailure, AnalyzeTestFailure, GenerateRCA
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +84,7 @@ class RCAReport:
     step_analyses: list[StepAnalysis]
     test_analyses: list[TestFailureAnalysis] = field(default_factory=list)
     artifact_analyses: list[ArtifactAnalysis] = field(default_factory=list)
+    contributing_artifact_paths: list[str] = field(default_factory=list)
 
     def to_markdown(self) -> str:
         """Generate markdown formatted report with leak detection."""
@@ -111,6 +114,26 @@ class RCAReport:
                         # Use expandable details - only show source in summary
                         parts.append(f"<details>\n<summary><code>{source}</code></summary>\n\n")
                         parts.append(f"```\n{content}\n```\n</details>\n\n")
+
+        # Add LLM-ranked contributing factors from artifact analyses (within Evidence section)
+        if self.contributing_artifact_paths:
+            artifact_lookup = {a.artifact_path: a for a in self.artifact_analyses}
+            contributing = [
+                artifact_lookup[path]
+                for path in self.contributing_artifact_paths
+                if path in artifact_lookup
+                and artifact_lookup[path].key_findings
+                and "no significant findings" not in artifact_lookup[path].key_findings.lower()
+                and "analysis failed" not in artifact_lookup[path].key_findings.lower()
+            ]
+            if contributing:
+                if not self.step_analyses:
+                    parts.append("## Evidence\n\n")
+                parts.append("### Contributing Factors\n\n")
+                for artifact in contributing:
+                    findings = artifact.key_findings.replace("`", "'").strip()
+                    parts.append(f"<details>\n<summary><code>{artifact.artifact_path}</code></summary>\n\n")
+                    parts.append(f"{findings}\n</details>\n\n")
 
         markdown_output = "".join(parts)
 
@@ -144,14 +167,23 @@ class FailureAnalyzer(dspy.Module):
         super().__init__()
         self.step_analyzer = dspy.ChainOfThought(AnalyzeStepFailure)
         self.test_analyzer = dspy.ChainOfThought(AnalyzeTestFailure)
-        # Use Predict for artifacts - simpler and more stable for JSON output
-        self.artifact_analyzer = dspy.Predict(AnalyzeArtifacts)
         self.rca_generator = dspy.ChainOfThought(GenerateRCA)
         self.preprocessor = preprocessor
         self.config = config
         self.tokens_per_step = tokens_per_step
         self.tokens_per_test = tokens_per_test
         self.tokens_per_artifact_batch = tokens_per_artifact_batch
+
+        # Initialize Genji backend for artifact analysis (guarantees valid JSON output)
+        self._genji_backend: GenjiBackend | None = None
+        if config:
+            model_str = f"{config.llm_provider}/{config.llm_model}"
+            backend_kwargs: dict[str, Any] = {"model": model_str, "temperature": 0.0}
+            if config.llm_api_key:
+                backend_kwargs["api_key"] = config.llm_api_key
+            if config.llm_base_url:
+                backend_kwargs["base_url"] = config.llm_base_url
+            self._genji_backend = GenjiBackend(**backend_kwargs)
 
     def _get_step_context(self, step: StepResult, step_graph: dict[str, Any]) -> str:
         """Extract step context from the step graph."""
@@ -331,60 +363,20 @@ class FailureAnalyzer(dspy.Module):
 
         return batches
 
-    def _parse_artifact_findings(self, raw_findings: str, batch_num: int) -> list[dict[str, str]]:
-        """Parse and validate artifact findings JSON with fallback handling."""
-        if not raw_findings or not raw_findings.strip():
-            raise json.JSONDecodeError("Empty response from LLM", "", 0)
-
-        # Clean up common LLM response issues
-        cleaned = raw_findings.strip()
-
-        # Remove markdown code blocks if present
-        if cleaned.startswith("```json"):
-            cleaned = cleaned[7:]
-        if cleaned.startswith("```"):
-            cleaned = cleaned[3:]
-        if cleaned.endswith("```"):
-            cleaned = cleaned[:-3]
-        cleaned = cleaned.strip()
-
-        if not cleaned:
-            raise json.JSONDecodeError("Response contained only markdown formatting", "", 0)
-
-        # Sanitize control characters that LLMs often include unescaped
-        cleaned = _sanitize_json_string(cleaned)
-
-        findings_list = json.loads(cleaned)
-
-        if not isinstance(findings_list, list):
-            raise ValueError(f"Expected JSON array, got {type(findings_list).__name__}")
-
-        # Validate each finding has required keys
-        for i, finding in enumerate(findings_list):
-            if not isinstance(finding, dict):
-                raise ValueError(f"Finding {i} is not a dict: {type(finding).__name__}")
-            if "artifact_path" not in finding:
-                raise KeyError(f"Finding {i} missing 'artifact_path'")
-            if "key_findings" not in finding:
-                raise KeyError(f"Finding {i} missing 'key_findings'")
-
-        return findings_list
-
-    @retry_with_backoff(max_retries=3, base_delay=2.0, rate_limit_delay=10.0, context_errors_no_retry=True)
-    def _call_artifact_analyzer(self, artifacts_json: str) -> Any:
-        """Call DSPy artifact analyzer with retry handling."""
-        return self.artifact_analyzer(artifacts_json=artifacts_json)
-
     def _analyze_artifact_batch(self, batch: dict[str, str], batch_num: int) -> list[ArtifactAnalysis]:
-        """Analyze a batch of artifacts together with automatic retry logic."""
+        """Analyze a batch of artifacts using Genji template rendering.
+
+        Genji templates own the JSON structure (brackets, commas, keys) while the LLM
+        only generates string content via gen() calls. This guarantees valid JSON output
+        and eliminates the parsing failures seen with the previous DSPy approach.
+        """
         if not batch:
             return []
 
         logger.info(f"Analyzing artifact batch {batch_num} ({len(batch)} artifacts)")
-        artifacts_json = json.dumps(batch, indent=2)
 
         # Check if the batch itself is too large (safety check)
-        batch_tokens = _estimate_tokens(artifacts_json)
+        batch_tokens = _estimate_tokens(json.dumps(batch))
         # Use 90% of context limit as absolute max for a single batch
         if self.config:
             max_batch_tokens = int(self.config.detect_model_context_limit() * 0.90)
@@ -402,15 +394,12 @@ class FailureAnalyzer(dspy.Module):
                 ]
 
         try:
-            result = self._call_artifact_analyzer(artifacts_json)
-
-            # Get the raw response and log it for debugging if it fails
-            raw_findings = getattr(result, "artifact_findings", None)
-            if raw_findings is None:
-                raise ValueError("No artifact_findings in response")
-
-            # Parse and validate the JSON output
-            findings_list = self._parse_artifact_findings(raw_findings, batch_num)
+            template = GenjiTemplate.from_file(
+                Path(__file__).parent / "templates" / "artifact_analysis.json.genji",
+                backend=self._genji_backend,
+            )
+            rendered = template.render(artifacts=batch)
+            findings_list = json.loads(rendered)
 
             return [
                 ArtifactAnalysis(
@@ -420,8 +409,7 @@ class FailureAnalyzer(dspy.Module):
                 for finding in findings_list
             ]
         except Exception as e:
-            logger.error(f"Artifact batch {batch_num}: analysis failed after all retries: {e}")
-            # Return error entries for each artifact in the batch
+            logger.error(f"Artifact batch {batch_num}: analysis failed: {e}")
             return [
                 ArtifactAnalysis(
                     artifact_path=path,
@@ -568,6 +556,17 @@ class FailureAnalyzer(dspy.Module):
                 artifacts_json,
             )
 
+            # Parse LLM-ranked contributing artifact paths
+            contributing_paths: list[str] = []
+            try:
+                raw_paths = getattr(rca, "contributing_artifact_paths", "[]")
+                sanitized = _sanitize_json_string(raw_paths)
+                parsed = json.loads(sanitized)
+                if isinstance(parsed, list):
+                    contributing_paths = [str(p) for p in parsed]
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning(f"Failed to parse contributing_artifact_paths: {e}")
+
             return RCAReport(
                 job_name=job_result.job_name,
                 build_id=job_result.build_id,
@@ -578,6 +577,7 @@ class FailureAnalyzer(dspy.Module):
                 step_analyses=step_analyses,
                 test_analyses=test_analyses,
                 artifact_analyses=artifact_analyses,
+                contributing_artifact_paths=contributing_paths,
             )
         except Exception as e:
             logger.error(f"RCA generation failed after all retries: {e}")

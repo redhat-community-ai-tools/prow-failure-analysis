@@ -57,33 +57,6 @@ class AnalyzeTestFailure(dspy.Signature):
     root_cause_summary: str = dspy.OutputField(desc="One sentence stating the immediate technical cause")
 
 
-class AnalyzeArtifacts(dspy.Signature):
-    """Analyze multiple diagnostic artifacts to extract key findings from each.
-
-    Artifacts provide supplemental context about cluster/system state.
-    They are NOT failure sources - extract relevant environmental details.
-
-    IMPORTANT: Content has been preprocessed with semantic anomaly detection.
-    - Only anomalous/unusual sections are shown
-    - May be wrapped in XML tags: <block lines="X-Y" score="S">...</block>
-
-    Process each artifact independently and return findings for each.
-    You MUST return a valid JSON array even if artifacts are empty or have no findings.
-    """
-
-    artifacts_json: str = dspy.InputField(desc="JSON string of dict mapping artifact paths to preprocessed content")
-
-    artifact_findings: str = dspy.OutputField(
-        desc=(
-            'Return a valid JSON array. Each element must have "artifact_path" and "key_findings" keys. '
-            'Example: [{"artifact_path": "path/file.json", "key_findings": "Found X pods in error."}]. '
-            "key_findings should be 2-3 sentences summarizing relevant details or anomalies. "
-            "If an artifact has no relevant findings, set key_findings to 'No significant findings.' "
-            "ALWAYS return valid JSON - never return empty or malformed responses."
-        )
-    )
-
-
 class GenerateRCA(dspy.Signature):
     """Generate a professional, concise root cause analysis for pipeline failures.
 
@@ -97,6 +70,9 @@ class GenerateRCA(dspy.Signature):
        - Do NOT restate the root cause multiple times
     5. Use professional technical language
     6. Focus on facts from the analyses - do not invent information
+    7. NEVER fabricate specific details like IP addresses, port numbers, error codes, file paths,
+       database names, service names, or metrics that do not appear in the provided analyses.
+       Only cite details that are explicitly present in the input data.
 
     Cross-reference step and test analyses to understand causation.
     """
@@ -133,4 +109,14 @@ class GenerateRCA(dspy.Signature):
     )
     category: str = dspy.OutputField(
         desc="Primary failure category: infrastructure/test/build/configuration/timeout/unknown"
+    )
+    contributing_artifact_paths: str = dspy.OutputField(
+        desc=(
+            "JSON array of up to 10 artifact paths from additional_context that are most relevant "
+            "to the failure as contributing factors. Select only artifacts whose findings are directly "
+            "related to the root cause or environmental issues that likely contributed to the failure. "
+            "Return exact artifact_path strings from the input. "
+            'Example: ["pods/controller.log", "events.json"]. '
+            "Return an empty array [] if no artifacts are relevant."
+        )
     )

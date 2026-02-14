@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from prow_failure_analysis.analysis.analyzer import (
+    ArtifactAnalysis,
     FailureAnalyzer,
     RCAReport,
     StepAnalysis,
@@ -81,125 +82,69 @@ class TestSanitizeJsonString:
         assert parsed["message"] == 'said "hello"'
 
 
-class TestParseArtifactFindings:
-    """Tests for _parse_artifact_findings method."""
+class TestArtifactBatchGenji:
+    """Tests for Genji-based artifact batch analysis."""
 
-    def test_parse_valid_json_array(self, mocker):
-        """Test parsing a valid JSON array of findings."""
+    def test_single_artifact_produces_valid_json(self, mocker):
+        """Test that a single artifact batch produces valid ArtifactAnalysis output."""
+        from genji import MockBackend
+
+        mocker.patch("prow_failure_analysis.analysis.analyzer.dspy")
+        analyzer = FailureAnalyzer()
+        analyzer._genji_backend = MockBackend(default_response="No significant findings.")
+
+        result = analyzer._analyze_artifact_batch({"test.log": "some log content"}, batch_num=1)
+
+        assert len(result) == 1
+        assert result[0].artifact_path == "test.log"
+        assert result[0].key_findings == "No significant findings."
+
+    def test_multiple_artifacts_valid_json(self, mocker):
+        """Test that multiple artifacts in a batch all produce valid output."""
+        from genji import MockBackend
+
+        mocker.patch("prow_failure_analysis.analysis.analyzer.dspy")
+        analyzer = FailureAnalyzer()
+        analyzer._genji_backend = MockBackend(default_response="Found error.")
+
+        batch = {"a.yaml": "content a", "b.log": "content b", "c.json": "content c"}
+        result = analyzer._analyze_artifact_batch(batch, batch_num=1)
+
+        assert len(result) == 3
+        paths = [r.artifact_path for r in result]
+        assert "a.yaml" in paths
+        assert "b.log" in paths
+        assert "c.json" in paths
+        for r in result:
+            assert r.key_findings == "Found error."
+
+    def test_empty_batch_returns_empty(self, mocker):
+        """Test that an empty batch returns an empty list without calling the backend."""
         mocker.patch("prow_failure_analysis.analysis.analyzer.dspy")
         analyzer = FailureAnalyzer()
 
-        raw = '[{"artifact_path": "pod.yaml", "key_findings": "Pod crashed"}]'
-        findings = analyzer._parse_artifact_findings(raw, batch_num=1)
+        result = analyzer._analyze_artifact_batch({}, batch_num=1)
 
-        assert len(findings) == 1
-        assert findings[0]["artifact_path"] == "pod.yaml"
-        assert findings[0]["key_findings"] == "Pod crashed"
+        assert result == []
 
-    def test_parse_strips_markdown_json_block(self, mocker):
-        """Test parsing strips ```json markdown wrapper."""
+    def test_backend_error_returns_failure_entries(self, mocker):
+        """Test that a backend error returns ArtifactAnalysis entries with error messages."""
+        from genji import MockBackend
+
         mocker.patch("prow_failure_analysis.analysis.analyzer.dspy")
         analyzer = FailureAnalyzer()
 
-        raw = '```json\n[{"artifact_path": "test.log", "key_findings": "Error found"}]\n```'
-        findings = analyzer._parse_artifact_findings(raw, batch_num=1)
+        # Use a response_fn that raises to simulate backend failure
+        def raise_error(prompt: str) -> str:
+            raise RuntimeError("API down")
 
-        assert len(findings) == 1
-        assert findings[0]["artifact_path"] == "test.log"
+        analyzer._genji_backend = MockBackend(response_fn=raise_error)
 
-    def test_parse_strips_plain_markdown_block(self, mocker):
-        """Test parsing strips plain ``` markdown wrapper."""
-        mocker.patch("prow_failure_analysis.analysis.analyzer.dspy")
-        analyzer = FailureAnalyzer()
+        result = analyzer._analyze_artifact_batch({"test.log": "content"}, batch_num=1)
 
-        raw = '```\n[{"artifact_path": "test.log", "key_findings": "OK"}]\n```'
-        findings = analyzer._parse_artifact_findings(raw, batch_num=1)
-
-        assert len(findings) == 1
-        assert findings[0]["key_findings"] == "OK"
-
-    def test_parse_empty_response_raises(self, mocker):
-        """Test parsing empty response raises JSONDecodeError."""
-        mocker.patch("prow_failure_analysis.analysis.analyzer.dspy")
-        analyzer = FailureAnalyzer()
-
-        with pytest.raises(json.JSONDecodeError):
-            analyzer._parse_artifact_findings("", batch_num=1)
-
-    def test_parse_whitespace_only_raises(self, mocker):
-        """Test parsing whitespace-only response raises JSONDecodeError."""
-        mocker.patch("prow_failure_analysis.analysis.analyzer.dspy")
-        analyzer = FailureAnalyzer()
-
-        with pytest.raises(json.JSONDecodeError):
-            analyzer._parse_artifact_findings("   \n\t  ", batch_num=1)
-
-    def test_parse_markdown_only_raises(self, mocker):
-        """Test parsing markdown-only response raises JSONDecodeError."""
-        mocker.patch("prow_failure_analysis.analysis.analyzer.dspy")
-        analyzer = FailureAnalyzer()
-
-        with pytest.raises(json.JSONDecodeError):
-            analyzer._parse_artifact_findings("```json\n```", batch_num=1)
-
-    def test_parse_non_array_raises(self, mocker):
-        """Test parsing non-array JSON raises ValueError."""
-        mocker.patch("prow_failure_analysis.analysis.analyzer.dspy")
-        analyzer = FailureAnalyzer()
-
-        with pytest.raises(ValueError, match="Expected JSON array"):
-            analyzer._parse_artifact_findings('{"key": "value"}', batch_num=1)
-
-    def test_parse_missing_artifact_path_raises(self, mocker):
-        """Test parsing finding without artifact_path raises KeyError."""
-        mocker.patch("prow_failure_analysis.analysis.analyzer.dspy")
-        analyzer = FailureAnalyzer()
-
-        with pytest.raises(KeyError, match="artifact_path"):
-            analyzer._parse_artifact_findings('[{"key_findings": "test"}]', batch_num=1)
-
-    def test_parse_missing_key_findings_raises(self, mocker):
-        """Test parsing finding without key_findings raises KeyError."""
-        mocker.patch("prow_failure_analysis.analysis.analyzer.dspy")
-        analyzer = FailureAnalyzer()
-
-        with pytest.raises(KeyError, match="key_findings"):
-            analyzer._parse_artifact_findings('[{"artifact_path": "test.log"}]', batch_num=1)
-
-    def test_parse_non_dict_finding_raises(self, mocker):
-        """Test parsing non-dict finding raises ValueError."""
-        mocker.patch("prow_failure_analysis.analysis.analyzer.dspy")
-        analyzer = FailureAnalyzer()
-
-        with pytest.raises(ValueError, match="not a dict"):
-            analyzer._parse_artifact_findings('["string", "items"]', batch_num=1)
-
-    def test_parse_sanitizes_control_chars(self, mocker):
-        """Test parsing sanitizes control characters in strings."""
-        mocker.patch("prow_failure_analysis.analysis.analyzer.dspy")
-        analyzer = FailureAnalyzer()
-
-        raw = '[{"artifact_path": "test.log", "key_findings": "error\nwith newlines"}]'
-        findings = analyzer._parse_artifact_findings(raw, batch_num=1)
-
-        assert "error" in findings[0]["key_findings"]
-        assert "newlines" in findings[0]["key_findings"]
-
-    def test_parse_multiple_findings(self, mocker):
-        """Test parsing multiple findings in array."""
-        mocker.patch("prow_failure_analysis.analysis.analyzer.dspy")
-        analyzer = FailureAnalyzer()
-
-        raw = """[
-            {"artifact_path": "file1.yaml", "key_findings": "Finding 1"},
-            {"artifact_path": "file2.json", "key_findings": "Finding 2"},
-            {"artifact_path": "file3.log", "key_findings": "Finding 3"}
-        ]"""
-        findings = analyzer._parse_artifact_findings(raw, batch_num=1)
-
-        assert len(findings) == 3
-        assert findings[0]["artifact_path"] == "file1.yaml"
-        assert findings[2]["key_findings"] == "Finding 3"
+        assert len(result) == 1
+        assert result[0].artifact_path == "test.log"
+        assert "Analysis failed" in result[0].key_findings
 
 
 class TestRCAReport:
@@ -293,6 +238,112 @@ class TestRCAReport:
         assert "Error 1" in md
         assert "<code>compile.log</code>" in md
         assert "Error 2" in md
+
+    def test_to_markdown_with_contributing_factors(self):
+        """Test markdown generation includes LLM-ranked contributing factors."""
+        report = RCAReport(
+            job_name="test-job",
+            build_id="12345",
+            pr_number=None,
+            summary="Test failed",
+            detailed_analysis="Details here",
+            category="test",
+            step_analyses=[
+                StepAnalysis(
+                    step_name="test-step",
+                    failure_category="test",
+                    root_cause="Test failed",
+                    evidence=[],
+                ),
+            ],
+            artifact_analyses=[
+                ArtifactAnalysis(artifact_path="pods/controller.log", key_findings="High memory usage detected."),
+                ArtifactAnalysis(artifact_path="events.json", key_findings="Network timeout errors observed."),
+                ArtifactAnalysis(artifact_path="unselected.yaml", key_findings="Disk errors found."),
+                ArtifactAnalysis(artifact_path="empty.yaml", key_findings="No significant findings."),
+            ],
+            # LLM selected only these two as relevant
+            contributing_artifact_paths=["pods/controller.log", "events.json"],
+        )
+
+        md = report.to_markdown()
+
+        # Contributing Factors subsection appears within Evidence
+        assert "## Evidence" in md
+        assert "### Contributing Factors" in md
+        # LLM-selected artifacts are included
+        assert "<code>pods/controller.log</code>" in md
+        assert "High memory usage detected." in md
+        assert "<code>events.json</code>" in md
+        assert "Network timeout errors observed." in md
+        # Artifacts NOT in LLM's list are excluded even if they have findings
+        assert "unselected.yaml" not in md
+        assert "empty.yaml" not in md
+
+    def test_to_markdown_contributing_factors_no_step_analyses(self):
+        """Test contributing factors still renders when there are no step analyses."""
+        report = RCAReport(
+            job_name="test-job",
+            build_id="12345",
+            pr_number=None,
+            summary="Test failed",
+            detailed_analysis="Details here",
+            category="test",
+            step_analyses=[],
+            artifact_analyses=[
+                ArtifactAnalysis(artifact_path="pods/api.log", key_findings="Connection refused errors."),
+            ],
+            contributing_artifact_paths=["pods/api.log"],
+        )
+
+        md = report.to_markdown()
+
+        assert "## Evidence" in md
+        assert "### Contributing Factors" in md
+        assert "<code>pods/api.log</code>" in md
+        assert "Connection refused errors." in md
+
+    def test_to_markdown_no_contributing_factors_when_empty_paths(self):
+        """Test contributing factors section is omitted when LLM returns no paths."""
+        report = RCAReport(
+            job_name="test-job",
+            build_id="12345",
+            pr_number=None,
+            summary="Test failed",
+            detailed_analysis="Details here",
+            category="test",
+            step_analyses=[],
+            artifact_analyses=[
+                ArtifactAnalysis(artifact_path="a.yaml", key_findings="Some finding."),
+            ],
+            contributing_artifact_paths=[],
+        )
+
+        md = report.to_markdown()
+
+        assert "### Contributing Factors" not in md
+
+    def test_to_markdown_contributing_factors_filters_noise(self):
+        """Test that LLM-selected paths with noise findings are still filtered out."""
+        report = RCAReport(
+            job_name="test-job",
+            build_id="12345",
+            pr_number=None,
+            summary="Test failed",
+            detailed_analysis="Details here",
+            category="test",
+            step_analyses=[],
+            artifact_analyses=[
+                ArtifactAnalysis(artifact_path="a.yaml", key_findings="No significant findings."),
+                ArtifactAnalysis(artifact_path="b.log", key_findings="Analysis failed: timeout"),
+            ],
+            # LLM selected these but they're noise
+            contributing_artifact_paths=["a.yaml", "b.log"],
+        )
+
+        md = report.to_markdown()
+
+        assert "### Contributing Factors" not in md
 
 
 class TestFailureAnalyzer:
