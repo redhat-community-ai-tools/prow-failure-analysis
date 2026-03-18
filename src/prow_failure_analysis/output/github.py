@@ -6,6 +6,9 @@ from github import Auth, Github
 from ..security.leak_detector import LeakDetector
 
 if TYPE_CHECKING:
+    from github.IssueComment import IssueComment
+    from github.PullRequest import PullRequest
+
     from ..analysis.analyzer import RCAReport
 
 logger = logging.getLogger(__name__)
@@ -13,7 +16,7 @@ logger = logging.getLogger(__name__)
 BOT_COMMENT_MARKER = "## 🤖 Pipeline Failure Analysis"
 
 
-def _find_existing_bot_comment(pr):
+def _find_existing_bot_comment(pr: "PullRequest") -> "IssueComment | None":
     """Find existing bot comment on the PR, if any."""
     for comment in pr.get_issue_comments():
         if comment.body and comment.body.startswith(BOT_COMMENT_MARKER):

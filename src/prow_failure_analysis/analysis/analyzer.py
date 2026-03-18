@@ -344,9 +344,7 @@ class FailureAnalyzer(dspy.Module):
 
                 # Put the large artifact in its own batch (will be caught by safety check)
                 batches.append({path: content})
-                logger.warning(
-                    f"Artifact {path} is very large ({artifact_tokens:,} tokens), " "placing in separate batch"
-                )
+                logger.warning(f"Artifact {path} is very large ({artifact_tokens:,} tokens), placing in separate batch")
                 continue
 
             # If adding this artifact would exceed limit, start new batch

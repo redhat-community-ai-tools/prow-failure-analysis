@@ -110,9 +110,7 @@ class TestPostPRComment:
         """Test comment body includes category."""
         _, mock_pr = _setup_github_mocks(mocker)
 
-        report = _make_report(
-            summary="Build failed", category="infrastructure"
-        )
+        report = _make_report(summary="Build failed", category="infrastructure")
         post_pr_comment("fake-token", "org/repo", 123, report)
 
         call_args = mock_pr.create_issue_comment.call_args[0][0]
@@ -171,9 +169,7 @@ class TestPostPRComment:
         old_comment.body = f"{BOT_COMMENT_MARKER}\n\nold analysis"
         old_comment.id = 99
 
-        _, mock_pr = _setup_github_mocks(
-            mocker, existing_comments=[old_comment]
-        )
+        _, mock_pr = _setup_github_mocks(mocker, existing_comments=[old_comment])
 
         report = _make_report()
         post_pr_comment("fake-token", "org/repo", 123, report)
