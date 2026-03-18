@@ -124,7 +124,7 @@ class Config:
                 "Set GITHUB_TOKEN env var or use ORG_REPO/--org-repo to explicitly specify."
             )
             first_dash = dashes[0]
-            return f"{org_repo_section[:first_dash]}_{org_repo_section[first_dash + 1:]}"
+            return f"{org_repo_section[:first_dash]}_{org_repo_section[first_dash + 1 :]}"
 
         for dash_idx in dashes:
             org = org_repo_section[:dash_idx]
@@ -139,7 +139,7 @@ class Config:
             "Use ORG_REPO env var or --org-repo flag to explicitly specify."
         )
         first_dash = dashes[0]
-        return f"{org_repo_section[:first_dash]}_{org_repo_section[first_dash + 1:]}"
+        return f"{org_repo_section[:first_dash]}_{org_repo_section[first_dash + 1 :]}"
 
     def infer_org_repo(self) -> str | None:
         """Infer org_repo from job name by trying different splits and validating against GitHub.

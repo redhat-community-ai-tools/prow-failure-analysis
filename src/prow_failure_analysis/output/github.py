@@ -6,9 +6,22 @@ from github import Auth, Github
 from ..security.leak_detector import LeakDetector
 
 if TYPE_CHECKING:
+    from github.IssueComment import IssueComment
+    from github.PullRequest import PullRequest
+
     from ..analysis.analyzer import RCAReport
 
 logger = logging.getLogger(__name__)
+
+BOT_COMMENT_MARKER = "## 🤖 Pipeline Failure Analysis"
+
+
+def _find_existing_bot_comment(pr: "PullRequest") -> "IssueComment | None":
+    """Find existing bot comment on the PR, if any."""
+    for comment in pr.get_issue_comments():
+        if comment.body and comment.body.startswith(BOT_COMMENT_MARKER):
+            return comment
+    return None
 
 
 def post_pr_comment(
@@ -37,6 +50,8 @@ def post_pr_comment(
     try:
         repo = g.get_repo(github_repo)
         pr = repo.get_pull(pr_number)
+
+        existing_comment = _find_existing_bot_comment(pr)
 
         comment_body = f"""## 🤖 Pipeline Failure Analysis
 
@@ -83,8 +98,12 @@ def post_pr_comment(
         leak_detector = LeakDetector()
         sanitized_comment = leak_detector.sanitize_text(comment_body)
 
-        pr.create_issue_comment(sanitized_comment)
-        logger.info("Comment posted successfully")
+        if existing_comment:
+            existing_comment.edit(sanitized_comment)
+            logger.info(f"Updated existing comment (id={existing_comment.id})")
+        else:
+            pr.create_issue_comment(sanitized_comment)
+            logger.info("New comment posted successfully")
 
     finally:
         g.close()
