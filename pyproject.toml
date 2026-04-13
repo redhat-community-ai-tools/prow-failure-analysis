@@ -17,7 +17,7 @@ dependencies = [
     "tokenizers>=0.13.0",
     "PyGithub>=2.1.0",
     "detect-secrets>=1.4.0",
-    "genji>=0.1.0",
+    "genji>=1.0.1",
 ]
 
 [project.optional-dependencies]
